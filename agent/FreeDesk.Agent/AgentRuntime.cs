@@ -50,6 +50,7 @@ public sealed class AgentRuntime
                 await HandleIncomingAsync(ct);
                 await HandleKeyPressesAsync(ct);
                 await PollSessionsAsync(ct);
+                SyncClipboards();
             }
             catch (OperationCanceledException)
             {
@@ -258,7 +259,7 @@ public sealed class AgentRuntime
                 Log.Info($"ввод: {json}");
             }
 
-            session.Injector.Handle(json);
+            HandleControl(session, json);
         };
 
         peer.Closed += reason =>
@@ -357,6 +358,46 @@ public sealed class AgentRuntime
         }
     }
 
+    private void HandleControl(ActiveSession session, string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+
+            if (root.TryGetProperty("t", out var type) && type.GetString() == "cb")
+            {
+                session.Clipboard.Incoming(root);
+                return;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        session.Injector.Handle(json);
+    }
+
+    /// <summary>Отправляет peer'у изменившийся локальный буфер обмена (раз в цикл).</summary>
+    private void SyncClipboards()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            // буфер отдаёт только та сторона, чей экран смотрят (не инициатор)
+            if (session.Transport is not { IsConnected: true } || session.Role == "host")
+            {
+                continue;
+            }
+
+            var json = session.Clipboard.PollOutgoingJson();
+            if (json is not null)
+            {
+                Log.Info($"буфер обмена → peer ({json.Length} байт)");
+                session.Transport.SendControl(json);
+            }
+        }
+    }
+
     private void AttachTransportIfNeeded(ActiveSession session)
     {
         if (session.Transport is null)
@@ -393,5 +434,6 @@ public sealed class AgentRuntime
         public int InputCount { get; set; }
         public int EndedFlag;
         public InputInjector Injector { get; } = new();
+        public ClipboardSync Clipboard { get; } = new();
     }
 }

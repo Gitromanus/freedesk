@@ -14,6 +14,7 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly System.Diagnostics.Stopwatch _rxWatch = System.Diagnostics.Stopwatch.StartNew();
     private CancellationTokenSource? _cts;
     private int _started;
+    private readonly ClipboardSync _clipboard = new();
 
     public event Action<byte[]>? FrameReceived;
     public event Action<string>? StatusChanged;
@@ -67,6 +68,16 @@ public sealed class ViewerSession : IAsyncDisposable
                     break;
                 }
 
+                // текстовый буфер обмена — в обе стороны, пока канал открыт
+                if (_peer is { IsConnected: true })
+                {
+                    var json = _clipboard.PollOutgoingJson();
+                    if (json is not null)
+                    {
+                        _peer.SendControl(json);
+                    }
+                }
+
                 await Task.Delay(500, ct);
             }
         }
@@ -112,6 +123,23 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             StatusChanged?.Invoke("канал установлен");
             Connected?.Invoke();
+        };
+
+        peer.ControlReceived += json =>
+        {
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(json);
+                var root = document.RootElement;
+
+                if (root.TryGetProperty("t", out var type) && type.GetString() == "cb")
+                {
+                    _clipboard.Incoming(root);
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+            }
         };
 
         peer.Closed += reason =>

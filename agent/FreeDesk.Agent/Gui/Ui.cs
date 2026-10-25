@@ -93,6 +93,7 @@ public static class Ui
                 CaptionGlyph.ChevronRight => "\uE76C",
                 CaptionGlyph.Edit => "\uE70F",
                 CaptionGlyph.Delete => "\uE74D",
+                CaptionGlyph.Settings => "\uE713",
                 _ => "?",
             };
         }
@@ -107,6 +108,7 @@ public static class Ui
             CaptionGlyph.ChevronRight => "\u203A",
             CaptionGlyph.Edit => "\u270E",
             CaptionGlyph.Delete => "\u2715",
+            CaptionGlyph.Settings => "\u2699",
             _ => "?",
         };
     }
@@ -125,6 +127,7 @@ public enum CaptionGlyph
     ChevronRight,
     Edit,
     Delete,
+    Settings,
 }
 
 /// <summary>Панель с двойной буферизацией: без мерцания при перерисовке.</summary>
@@ -657,21 +660,25 @@ public sealed class UiInput : Panel
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
 
         Box.BorderStyle = BorderStyle.None;
-        Box.Dock = DockStyle.Fill;
         Box.Font = new Font("Segoe UI", 11f);
         Box.ForeColor = Ui.Ink;
         Box.BackColor = Ui.Field;
         Box.PlaceholderText = placeholder;
-        Box.Padding = new Padding(0);
-
-        var pad = new Padding(14, 0, 14, 0);
-        Box.Margin = pad;
-        Padding = pad;
 
         Box.Enter += (_, _) => { _focused = true; Invalidate(); };
         Box.Leave += (_, _) => { _focused = false; Invalidate(); };
 
+        Resize += (_, _) => LayoutBox();
         Controls.Add(Box);
+        LayoutBox();
+    }
+
+    /// <summary>TextBox однострочный и сам подбирает высоту — центрируем вручную.</summary>
+    private void LayoutBox()
+    {
+        var pad = 14;
+        Box.Location = new Point(pad, Math.Max(0, (Height - Box.PreferredHeight) / 2));
+        Box.Size = new Size(Math.Max(0, Width - pad * 2), Box.PreferredHeight);
     }
 
     public string InputText

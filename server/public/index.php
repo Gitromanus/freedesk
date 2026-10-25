@@ -95,9 +95,11 @@ try {
 
         case $method === 'POST' && $path === '/api/v1/presence':
             $device = Auth::device();
+            $body = Http::body();
+            $name = isset($body['name']) ? (string) $body['name'] : null;
             Http::json([
                 'ok' => true,
-                'server_time' => Devices::touch((int) $device['id']),
+                'server_time' => Devices::touch((int) $device['id'], $name),
             ]);
 
         case $method === 'GET' && preg_match('#^/api/v1/resolve/(\d{9})$#', $path, $m) === 1:

@@ -18,6 +18,11 @@
 - медиа — P2P WebRTC, **MJPEG по RTP** (не через data channel: SCTP в SIPSorcery
   упирается в ~300 КБ/с из-за `MAX_BURST = 4` пакета на SACK);
 - управление (мышь/клавиатура) — data channel, JSON;
+- **текстовый буфер обмена** синхронизируется в обе стороны (data channel,
+  `{"t":"cb","v":...}`, эхо подавляется);
+- **курсор рисуется в кадре**: GDI — DrawIconEx с реальным указателем, DXGI —
+  синтетическая стрелка с патчем фона (видна даже на неподвижном экране);
+- **автопереподключение** зрителя при обрыве: до 3 попыток с паузой 2 с;
 - статичные кадры не отправляются (побайтовое сравнение с предыдущим кадром),
   но раз в 5 с последний кадр пересылается — зритель восстанавливается после
   потери RTP-пакета на неподвижном экране; простой почти не тратит трафик;
@@ -39,12 +44,14 @@ agent/FreeDesk.Agent/            клиент (C#, .NET 9, Windows)
   ViewerSession.cs               сторона зрителя
   Gui/Ui.cs                      палитра, кастомные контролы, окно с WM_NCHITTEST
   Gui/MainForm.cs                главное окно: ID, подключение, недавние, просмотр
+  Gui/SettingsDialog.cs          настройки: имя, сервер, fps/качество/ширина, захват
   Gui/PromptDialog.cs            модальные диалоги (входящий запрос, переименование)
   Viewer/ViewerForm.cs           окно просмотра, мышь/клавиатура
   ScreenStreamer.cs              захват → JPEG → RTP, пропуск статичных кадров
+  ClipboardSync.cs               синхронизация текстового буфера обмена
   Capture/CaptureFactory.cs      выбор источника: dxgi с откатом на gdi
   Capture/DxgiScreenCapture.cs   Desktop Duplication (COM-интероп без зависимостей)
-  Capture/GdiScreenCapture.cs    BitBlt/PrintWindow, работает в RDP-сессиях
+  Capture/GdiScreenCapture.cs    BitBlt/PrintWindow + курсор, работает в RDP-сессиях
   Codec/JpegEncoder.cs           JPEG + масштабирование
   Input/InputInjector.cs         SendInput, нормализованные координаты
   tests/p2p-smoke.ps1            два процесса: хост + зритель

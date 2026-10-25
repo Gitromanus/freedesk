@@ -73,6 +73,8 @@ public sealed class GdiScreenCapture : IScreenCapture
             }
         }
 
+        DrawCursor();
+
         if (GetDIBits(_memoryDc, _bitmap, 0, (uint)Height, _buffer, ref _bitmapInfo, DibRgbColors) == 0)
         {
             throw new InvalidOperationException("GetDIBits завершился ошибкой");
@@ -81,6 +83,44 @@ public sealed class GdiScreenCapture : IScreenCapture
         stride = _stride;
         return _buffer;
     }
+
+    private const uint DiNormal = 0x0003;
+
+    /// <summary>
+    /// BitBlt/PrintWindow не захватывают указатель мыши — рисуем его сами,
+    /// иначе зритель не видит, куда тыкается на удалённой машине.
+    /// </summary>
+    private void DrawCursor()
+    {
+        var info = new CursorInfo { Size = Marshal.SizeOf<CursorInfo>() };
+        if (GetCursorInfo(ref info) == 0 || (info.Flags & CursorShowing) == 0)
+        {
+            return;
+        }
+
+        // координаты экранные; наш memory DC снят с (0,0) — совпадают напрямую
+        DrawIconEx(_memoryDc, info.PositionX, info.PositionY, info.CursorHandle, 0, 0, 0, IntPtr.Zero, DiNormal);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorInfo
+    {
+        public int Size;
+        public uint Flags;
+        public IntPtr CursorHandle;
+        public int PositionX;
+        public int PositionY;
+    }
+
+    private const uint CursorShowing = 0x0001;
+
+    [DllImport("user32.dll")]
+    private static extern int GetCursorInfo(ref CursorInfo pci);
+
+    [DllImport("user32.dll")]
+    private static extern bool DrawIconEx(
+        IntPtr hdc, int xLeft, int yTop, IntPtr hIcon,
+        int cxWidth, int cyHeight, uint istepIfAniCur, IntPtr hbrFlickerFreeDraw, uint diFlags);
 
     public void Dispose()
     {

@@ -32,6 +32,7 @@ public sealed class MainForm : ModernWindow
     private readonly ListBox _recentList = new();
     private readonly Label _recentEmpty = new();
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronLeft);
+    private readonly CaptionButton _settingsBtn = new(CaptionGlyph.Settings);
 
     private readonly DoubleBufferedPanel _viewBar = new();
     private readonly Label _viewTitle = new();
@@ -43,6 +44,11 @@ public sealed class MainForm : ModernWindow
     private bool _sidebarCollapsed;
     private bool _collapsedForSession;
     private int _hoveredRecent = -1;
+
+    // автопереподключение при обрыве (не при ручном «Отключиться»)
+    private string? _lastTarget;
+    private int _reconnectAttempts;
+    private bool _userDisconnected;
 
     private readonly string _recentPath;
     private Color _statusColor = Ui.Amber;
@@ -74,6 +80,7 @@ public sealed class MainForm : ModernWindow
 
         _root.Dock = DockStyle.Fill;
         _root.BackColor = Ui.Bg;
+        _root.Resize += (_, _) => LayoutRoot();
         _root.Controls.Add(_mainArea);
         _root.Controls.Add(_sidebar);
         Controls.Add(_root);
@@ -81,13 +88,27 @@ public sealed class MainForm : ModernWindow
         BuildSidebar();
         BuildMainArea();
         WireRuntime();
+        LayoutRoot();
+    }
+
+    /// <summary>
+    /// Ручной layout вместо Dock: Fill-панель в паре с Dock.Left из-за порядка
+    /// dock-обработки занимала всё окно, и hero центрировался по всему окну,
+    /// игнорируя сайдбар. Здесь правая область всегда строго правее панели.
+    /// </summary>
+    private void LayoutRoot()
+    {
+        _sidebar.Location = new Point(0, 0);
+        _sidebar.Size = new Size(_sidebar.Width, Math.Max(0, _root.Height));
+
+        _mainArea.Location = new Point(_sidebar.Width, 0);
+        _mainArea.Size = new Size(Math.Max(0, _root.Width - _sidebar.Width), Math.Max(0, _root.Height));
     }
 
     // ─────────── боковая панель ───────────
 
     private void BuildSidebar()
     {
-        _sidebar.Dock = DockStyle.Left;
         _sidebar.Width = SidebarWidth;
         _sidebar.BackColor = Ui.CardDeep;
         _sidebar.Paint += DrawSidebarChrome;
@@ -192,13 +213,18 @@ public sealed class MainForm : ModernWindow
         _recentEmpty.Size = new Size(w, 48);
         _recentEmpty.Anchor = AnchorStyles.Top | AnchorStyles.Left;
 
-        // ── сворачивание панели ──
+        // ── сворачивание панели и настройки ──
         _collapseBtn.Size = new Size(32, 32);
         _collapseBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _collapseBtn.Click += () => ToggleSidebar();
 
+        _settingsBtn.Size = new Size(32, 32);
+        _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _settingsBtn.Click += () => OpenSettings();
+
         _sidebar.Resize += (_, _) =>
         {
+            _settingsBtn.Location = new Point(_sidebar.Width - _settingsBtn.Width - 12, 48);
             _collapseBtn.Location = new Point(_sidebar.Width - _collapseBtn.Width - 12, 10);
             _recentList.Height = Math.Max(48, _sidebar.Height - _recentList.Top - 20);
             _recentEmpty.Visible = !_sidebarCollapsed && _recentList.Items.Count == 0;
@@ -208,7 +234,7 @@ public sealed class MainForm : ModernWindow
         {
             idCaption, _idLabel, idHint, _statusText,
             _targetInput, _connectBtn, _autoAccept,
-            _recentList, _recentEmpty, _collapseBtn,
+            _recentList, _recentEmpty, _collapseBtn, _settingsBtn,
         });
         _sidebar.BringToFront();
 
@@ -257,7 +283,7 @@ public sealed class MainForm : ModernWindow
 
             foreach (Control c in _sidebar.Controls)
             {
-                if (c != _collapseBtn) c.Visible = false;
+                if (c != _collapseBtn && c != _settingsBtn) c.Visible = false;
             }
         }
         else
@@ -270,6 +296,8 @@ public sealed class MainForm : ModernWindow
                 c.Visible = true;
             }
         }
+
+        LayoutRoot();
     }
 
     // ─────────── список недавних ───────────
@@ -340,12 +368,14 @@ public sealed class MainForm : ModernWindow
             ? FormatId(entry.Id)
             : entry.Name;
 
+        // обе надписи центрированы по вертикали строки; под ID отведено 84px,
+        // чтобы «248 292 610» (Consolas) влезал целиком
         TextRenderer.DrawText(g, name, nameFont,
-            new Rectangle(e.Bounds.X + 22, e.Bounds.Y + 4, e.Bounds.Width - 22 - 130, 20),
+            new Rectangle(e.Bounds.X + 22, e.Bounds.Y, e.Bounds.Width - 22 - 130, e.Bounds.Height),
             Ui.Ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 
         TextRenderer.DrawText(g, FormatId(entry.Id), idFont,
-            new Rectangle(e.Bounds.Right - 128, e.Bounds.Y + 4, 60, 20),
+            new Rectangle(e.Bounds.Right - 152, e.Bounds.Y, 84, e.Bounds.Height),
             Ui.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
 
         // значки «изменить» и «удалить» видны только на активной строке
@@ -368,7 +398,6 @@ public sealed class MainForm : ModernWindow
 
     private void BuildMainArea()
     {
-        _mainArea.Dock = DockStyle.Fill;
         _mainArea.BackColor = Ui.Bg;
         _mainArea.Padding = new Padding(24);
 
@@ -619,6 +648,9 @@ public sealed class MainForm : ModernWindow
 
             ShowViewer(target);
             SetStatus("Подключено", Ui.Green);
+            _lastTarget = target;
+            _reconnectAttempts = 0;
+            _userDisconnected = false;
 
             var name = target;
             try
@@ -719,6 +751,9 @@ public sealed class MainForm : ModernWindow
 
     private void Disconnect(bool keepStatus = false)
     {
+        _userDisconnected = true;
+        _reconnectAttempts = 0;
+
         if (_session is not null)
         {
             _session.Ended -= OnUiSessionEnded;
@@ -735,7 +770,52 @@ public sealed class MainForm : ModernWindow
         }
     }
 
-    private void OnUiSessionEnded() => BeginInvoke(OnSessionEnded);
+    private void OnUiSessionEnded() => BeginInvoke(() =>
+    {
+        // связь оборвалась сама — пробуем вернуть, пока не исчерпаны попытки
+        if (!_userDisconnected && _viewerForm is not null && _lastTarget is not null &&
+            _reconnectAttempts < 3 && !_cts.IsCancellationRequested)
+        {
+            _reconnectAttempts++;
+            SetStatus($"Связь потеряна, переподключение {_reconnectAttempts} из 3…", Ui.Amber);
+
+            var target = _lastTarget;
+            Task.Delay(2000).ContinueWith(
+                _ => { if (!_cts.IsCancellationRequested) BeginInvoke(() => _ = ConnectAsync(target)); },
+                TaskScheduler.Default);
+
+            return;
+        }
+
+        OnSessionEnded();
+    });
+
+    // ─────────── настройки ───────────
+
+    private void OpenSettings()
+    {
+        using var dialog = new SettingsDialog(_config);
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (dialog.ServerChanged)
+        {
+            // на новом сервере этот токен никому не известен — регистрируемся заново
+            _config.DeviceToken = null;
+            _config.PublicId = null;
+            _config.Save();
+
+            MessageBox.Show(
+                this,
+                "Сервер изменён. Перезапустите приложение — оно зарегистрируется заново и получит новый ID.",
+                "FreeDesk",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+    }
 
     // ─────────── буфер обмена ───────────
 

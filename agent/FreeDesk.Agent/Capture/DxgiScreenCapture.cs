@@ -25,6 +25,11 @@ public sealed class DxgiScreenCapture : IScreenCapture, IDisposable
     private int _blankFrames;
     private bool _disposed;
 
+    // курсор: DXGI не отдаёт указатель с кадром — рисуем сами, храня патч фона
+    private byte[] _cursorPatch = Array.Empty<byte>();
+    private int _cursorX = -1;
+    private int _cursorY = -1;
+
     public int Width => _width;
     public int Height => _height;
 
@@ -173,7 +178,9 @@ public sealed class DxgiScreenCapture : IScreenCapture, IDisposable
 
         if (hr != S_OK)
         {
-            // Нет нового кадра (статичный экран) — возвращаем предыдущий.
+            // Нет нового кадра (статичный экран) — возвращаем предыдущий
+            // (с нарисованным курсором, если он двигался).
+            DrawCursor(redraw: false);
             return _buffer;
         }
 
@@ -231,8 +238,139 @@ public sealed class DxgiScreenCapture : IScreenCapture, IDisposable
             if (resource != IntPtr.Zero) Marshal.Release(resource);
         }
 
+        // новый кадр перезаписал буфер — патч под курсором устарел, рисуем заново
+        _cursorX = -1;
+        _cursorY = -1;
+        DrawCursor(redraw: true);
+
         stride = _stride;
         return _buffer;
+    }
+
+    // ─────────── курсор ───────────
+
+    // классическая стрелка: '#' — чёрная обводка, 'o' — белая заливка
+    private static readonly string[] CursorSprite =
+    {
+        "#...........",
+        "##..........",
+        "#o#.........",
+        "#oo#........",
+        "#ooo#.......",
+        "#oooo#......",
+        "#ooooo#.....",
+        "#oooooo#....",
+        "#ooooooo#...",
+        "#oooooooo#..",
+        "#ooooooooo#.",
+        "#oooooooooo#",
+        "#oooo#######",
+        "#oo#o#......",
+        "#o#.#o#.....",
+        "##..#o#.....",
+        "#...#o#.....",
+        "....##......",
+    };
+
+    /// <summary>
+    /// Рисует стрелку в буфер по текущей позиции указателя. Фон под прежней
+    /// позицией восстанавливается из патча, поэтому курсор можно двигать и по
+    /// статичному экрану — отпечаток кадра изменится и зритель его увидит.
+    /// </summary>
+    private void DrawCursor(bool redraw)
+    {
+        if (!GetCursorPos(out var point))
+        {
+            return;
+        }
+
+        var spriteHeight = CursorSprite.Length;
+        var spriteWidth = CursorSprite[0].Length;
+
+        if (!redraw && point.X == _cursorX && point.Y == _cursorY)
+        {
+            return; // ничего не изменилось, курсор уже нарисован
+        }
+
+        // вернуть фон под старой стрелкой
+        if (_cursorX >= 0 && _cursorPatch.Length == spriteWidth * spriteHeight * 4)
+        {
+            Blit(_cursorPatch, _cursorX, _cursorY, spriteWidth, spriteHeight, copyBack: true);
+        }
+
+        _cursorX = point.X;
+        _cursorY = point.Y;
+
+        // сохранить фон под новой и нарисовать стрелку
+        _cursorPatch = new byte[spriteWidth * spriteHeight * 4];
+        Blit(_cursorPatch, point.X, point.Y, spriteWidth, spriteHeight, copyBack: false);
+
+        for (var y = 0; y < spriteHeight; y++)
+        {
+            for (var x = 0; x < spriteWidth; x++)
+            {
+                var cell = CursorSprite[y][x];
+                if (cell == '.')
+                {
+                    continue;
+                }
+
+                var px = point.X + x;
+                var py = point.Y + y;
+                if (px < 0 || px >= _width || py < 0 || py >= _height)
+                {
+                    continue;
+                }
+
+                var offset = (py * _stride) + (px * 4);
+                var value = cell == '#' ? (byte)0 : (byte)255;
+                _buffer[offset] = value;     // B
+                _buffer[offset + 1] = value; // G
+                _buffer[offset + 2] = value; // R
+                _buffer[offset + 3] = 255;   // A
+            }
+        }
+    }
+
+    /// <summary>Копирует прямоугольник между _buffer и патчем (с обрезкой по краям).</summary>
+    private void Blit(byte[] patch, int x, int y, int width, int height, bool copyBack)
+    {
+        for (var row = 0; row < height; row++)
+        {
+            var py = y + row;
+            if (py < 0 || py >= _height)
+            {
+                continue;
+            }
+
+            var span = Math.Min(width, _width - Math.Max(0, x));
+            if (span <= 0)
+            {
+                continue;
+            }
+
+            var patchOffset = row * width * 4 + Math.Max(0, -x) * 4;
+            var bufferOffset = (py * _stride) + Math.Max(0, x) * 4;
+
+            if (copyBack)
+            {
+                patch.AsSpan(patchOffset, span * 4).CopyTo(_buffer.AsSpan(bufferOffset, span * 4));
+            }
+            else
+            {
+                _buffer.AsSpan(bufferOffset, span * 4).CopyTo(patch.AsSpan(patchOffset, span * 4));
+            }
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
     }
 
     /// <summary>Выборочная проверка: пустая ли текстура (все сэмплы — нули).</summary>

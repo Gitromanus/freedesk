@@ -35,7 +35,9 @@ public sealed class SignalingClient : IDisposable
 
     public async Task PresenceAsync(CancellationToken ct)
     {
-        await SendAsync<JsonElement>(HttpMethod.Post, "api/v1/presence", null, ct);
+        // имя уезжает с каждым heartbeat: переименование в настройках применяется само
+        await SendAsync<JsonElement>(
+            HttpMethod.Post, "api/v1/presence", new { name = _config.Name }, ct);
     }
 
     public async Task<IncomingResult> IncomingAsync(CancellationToken ct)

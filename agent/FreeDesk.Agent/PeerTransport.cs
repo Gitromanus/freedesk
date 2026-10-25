@@ -34,6 +34,9 @@ public interface IPeerTransport : IAsyncDisposable
 
     void SendControl(string json);
 
+    /// <summary>Открыт ли data channel (можно слать управление и буфер обмена).</summary>
+    bool IsConnected { get; }
+
     /// <summary>Сколько байт ещё не отправлено в data channel.</summary>
     long BufferedBytes { get; }
 }
@@ -279,6 +282,8 @@ public sealed class WebRtcPeer : IPeerTransport
     }
 
     public long BufferedBytes => (long)(_channel?.bufferedAmount ?? 0);
+
+    public bool IsConnected => _channel is not null && _channel.readyState == RTCDataChannelState.open;
 
     public ValueTask DisposeAsync()
     {

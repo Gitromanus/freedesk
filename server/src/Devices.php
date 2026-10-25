@@ -64,9 +64,15 @@ final class Devices
         return $row;
     }
 
-    public static function touch(int $deviceId): int
+    public static function touch(int $deviceId, ?string $name = null): int
     {
-        Db::exec('UPDATE devices SET last_seen = NOW() WHERE id = ?', [$deviceId]);
+        // Имя можно поменять из настроек клиента — обновляем вместе с heartbeat.
+        $name = $name === null ? '' : trim($name);
+        if ($name !== '' && mb_strlen($name) <= 64) {
+            Db::exec('UPDATE devices SET last_seen = NOW(), name = ? WHERE id = ?', [$name, $deviceId]);
+        } else {
+            Db::exec('UPDATE devices SET last_seen = NOW() WHERE id = ?', [$deviceId]);
+        }
 
         return time();
     }
