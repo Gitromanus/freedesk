@@ -15,8 +15,13 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiInput _serverInput = new("https://…");
     private readonly UiInput _fpsInput = new("12");
     private readonly UiInput _qualityInput = new("80");
+    private readonly UiInput _bitrateInput = new("3000");
     private readonly UiInput _widthInput = new("1920");
+    private readonly UiButton _codecBtn = new("H.264 (openh264)") { Ghost = true, Radius = 10 };
     private readonly UiButton _captureBtn = new("Авто (DXGI → GDI)") { Ghost = true, Radius = 10 };
+
+    private static readonly string[] Codecs = { "h264", "mjpeg" };
+    private static readonly string[] CodecLabels = { "H.264 (openh264)", "MJPEG (JPEG по RTP)" };
 
     private static readonly string[] CaptureModes = { "auto", "dxgi", "gdi" };
     private static readonly string[] CaptureLabels =
@@ -27,6 +32,7 @@ public sealed class SettingsDialog : ModernWindow
     };
 
     private int _captureIndex;
+    private int _codecIndex;
     private readonly string _originalServer;
 
     public bool ServerChanged { get; private set; }
@@ -38,7 +44,7 @@ public sealed class SettingsDialog : ModernWindow
 
         Text = "Настройки";
         Width = 480;
-        Height = 520;
+        Height = 640;
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         BackColor = Ui.Card;
@@ -48,6 +54,7 @@ public sealed class SettingsDialog : ModernWindow
         AddCaptionButtons();
 
         _captureIndex = Math.Clamp(Array.IndexOf(CaptureModes, config.Capture), 0, 2);
+        _codecIndex = Math.Clamp(Array.IndexOf(Codecs, VideoCodecNames.Parse(config.Codec).ToWire()), 0, 1);
 
         const int x = 24;
         var w = Width - 48;
@@ -62,8 +69,20 @@ public sealed class SettingsDialog : ModernWindow
         y = AddField("ЧАСТОТА КАДРОВ (1–60)", _fpsInput, y) + 6;
         _fpsInput.InputText = config.Fps.ToString();
 
-        y = AddField("КАЧЕСТВО JPEG (10–100)", _qualityInput, y) + 6;
+        y = AddField("КАЧЕСТВО JPEG (10–100, ТОЛЬКО MJPEG)", _qualityInput, y) + 6;
         _qualityInput.InputText = config.JpegQuality.ToString();
+
+        y = AddField("БИТРЕЙТ H.264, КБИТ/С", _bitrateInput, y) + 6;
+        _bitrateInput.InputText = config.BitrateKbps.ToString();
+
+        y = AddField("КОДЕК", _codecBtn, y) + 6;
+        _codecBtn.Height = 40;
+        _codecBtn.Click += (_, _) =>
+        {
+            _codecIndex = (_codecIndex + 1) % Codecs.Length;
+            _codecBtn.Text = CodecLabels[_codecIndex];
+        };
+        _codecBtn.Text = CodecLabels[_codecIndex];
 
         y = AddField("МАКС. ШИРИНА КАДРА, PX (0 — БЕЗ МАСШТАБИРОВАНИЯ)", _widthInput, y) + 6;
         _widthInput.InputText = config.MaxWidth.ToString();
@@ -156,12 +175,15 @@ public sealed class SettingsDialog : ModernWindow
 
         if (!TryParseRange(_fpsInput.InputText, 1, 60, out var fps, "частота кадров")) return false;
         if (!TryParseRange(_qualityInput.InputText, 10, 100, out var quality, "качество JPEG")) return false;
+        if (!TryParseRange(_bitrateInput.InputText, 200, 50000, out var bitrate, "битрейт H.264")) return false;
         if (!TryParseRange(_widthInput.InputText, 0, 7680, out var width, "ширина кадра")) return false;
 
         _config.Name = name;
         _config.Server = server;
         _config.Fps = fps;
         _config.JpegQuality = quality;
+        _config.BitrateKbps = bitrate;
+        _config.Codec = Codecs[_codecIndex];
         _config.MaxWidth = width;
         _config.Capture = CaptureModes[_captureIndex];
         _config.Save();

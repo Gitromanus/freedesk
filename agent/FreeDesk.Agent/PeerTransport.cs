@@ -7,15 +7,16 @@ using SIPSorceryMedia.Abstractions;
 namespace FreeDesk.Agent;
 
 /// <summary>
-/// Транспорт между агентами. Видео идёт по RTP как MJPEG: SCTP-канал SIPSorcery
-/// ограничен ~300 КБ/с, а RTP лимита не имеет. Data channel остаётся для управления.
+/// Транспорт между агентами. Видео идёт по RTP: H.264 (openh264) либо JPEG.
+/// SCTP-канал SIPSorcery ограничен ~300 КБ/с, а RTP лимита не имеет.
+/// Data channel остаётся для управления.
 /// </summary>
 public interface IPeerTransport : IAsyncDisposable
 {
     /// <summary>Локальный ICE-кандидат, который надо отправить второй стороне.</summary>
     event Action<object>? LocalSignal;
 
-    /// <summary>Готовый JPEG-кадр от удалённой стороны.</summary>
+    /// <summary>Готовый кадр от удалённой стороны: JPEG или H.264 access unit.</summary>
     event Action<byte[]>? FrameReceived;
 
     /// <summary>Сообщение управления (ввод) от удалённой стороны.</summary>
@@ -24,13 +25,16 @@ public interface IPeerTransport : IAsyncDisposable
     event Action? Connected;
     event Action<string>? Closed;
 
+    /// <summary>Какой кодек согласован в SDP.</summary>
+    VideoCodec Codec { get; }
+
     Task<object> CreateOfferAsync(CancellationToken ct);
     Task<object> CreateAnswerAsync(JsonElement offer, CancellationToken ct);
     Task ApplyAnswerAsync(JsonElement answer, CancellationToken ct);
     Task AddRemoteIceAsync(JsonElement candidate, CancellationToken ct);
 
-    /// <summary>Отправить JPEG-кадр как MJPEG/RTP.</summary>
-    void SendFrame(byte[] jpeg, uint durationRtpUnits);
+    /// <summary>Отправить кадр: JPEG как MJPEG/RTP или H.264 access unit (Annex B).</summary>
+    void SendFrame(byte[] frame, uint durationRtpUnits);
 
     void SendControl(string json);
 
@@ -44,7 +48,11 @@ public interface IPeerTransport : IAsyncDisposable
 public sealed class WebRtcPeer : IPeerTransport
 {
     public const int JpegPayloadType = 26;
-    public const int JpegClockRate = 90000;
+    public const int H264PayloadType = 102;
+    public const int VideoClockRate = 90000;
+
+    private const string H264FormatParameters =
+        "profile-level-id=42e01f;packetization-mode=1;level-asymmetry-allowed=1";
 
     private readonly RTCPeerConnection _pc;
     private readonly bool _offerer;
@@ -54,15 +62,18 @@ public sealed class WebRtcPeer : IPeerTransport
     private bool _connected;
     private bool _disposed;
 
+    public VideoCodec Codec { get; }
+
     public event Action<object>? LocalSignal;
     public event Action<byte[]>? FrameReceived;
     public event Action<string>? ControlReceived;
     public event Action? Connected;
     public event Action<string>? Closed;
 
-    public WebRtcPeer(bool offerer)
+    public WebRtcPeer(bool offerer, VideoCodec codec = VideoCodec.Mjpeg)
     {
         _offerer = offerer;
+        Codec = codec;
 
         var configuration = new RTCConfiguration
         {
@@ -75,11 +86,13 @@ public sealed class WebRtcPeer : IPeerTransport
 
         _pc = new RTCPeerConnection(configuration);
 
-        // Обе стороны объявляют JPEG-трек: экран отдаёт агент, но m-line должна быть
-        // в offer, поэтому трек добавляет и зритель.
-        var videoTrack = new MediaStreamTrack(
-            new VideoFormat(VideoCodecsEnum.JPEG, JpegPayloadType, JpegClockRate, null),
-            MediaStreamStatusEnum.SendRecv);
+        // Обе стороны объявляют видео-трек: экран отдаёт агент, но m-line должна
+        // быть в offer, поэтому трек добавляет и зритель.
+        var format = codec == VideoCodec.H264
+            ? new VideoFormat(VideoCodecsEnum.H264, H264PayloadType, VideoClockRate, H264FormatParameters)
+            : new VideoFormat(VideoCodecsEnum.JPEG, JpegPayloadType, VideoClockRate, null);
+
+        var videoTrack = new MediaStreamTrack(format, MediaStreamStatusEnum.SendRecv);
 
         _pc.addTrack(videoTrack);
 
@@ -255,7 +268,7 @@ public sealed class WebRtcPeer : IPeerTransport
         _pendingCandidates.Clear();
     }
 
-    public void SendFrame(byte[] jpeg, uint durationRtpUnits)
+    public void SendFrame(byte[] frame, uint durationRtpUnits)
     {
         if (_channel is null || _channel.readyState != RTCDataChannelState.open)
         {
@@ -264,7 +277,16 @@ public sealed class WebRtcPeer : IPeerTransport
 
         try
         {
-            _pc.SendVideo(durationRtpUnits, jpeg);
+            // MJPEG — через SendVideo (там JPEG-путь), H.264 — напрямую в
+            // VideoStream.SendH264Frame: нужен именно FU-A пакетизатор NAL'ов.
+            if (Codec == VideoCodec.H264)
+            {
+                _pc.VideoStream.SendH264Frame(durationRtpUnits, H264PayloadType, frame);
+            }
+            else
+            {
+                _pc.SendVideo(durationRtpUnits, frame);
+            }
         }
         catch (Exception ex)
         {

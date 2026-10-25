@@ -1,3 +1,6 @@
+using System.Drawing;
+using FreeDesk.Agent.Codec;
+
 namespace FreeDesk.Agent;
 
 /// <summary>Сторона зрителя: инициирует сессию, принимает кадры, отправляет ввод.</summary>
@@ -5,28 +8,35 @@ public sealed class ViewerSession : IAsyncDisposable
 {
     private readonly SignalingClient _client;
     private readonly string _targetId;
+    private readonly VideoCodec _codec;
+    private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
     private long _cursor;
     private bool _offerSent;
     private int _frameCount;
     private long _rxBytes;
+    private DateTime _lastKeyframeRequest = DateTime.MinValue;
     private readonly System.Diagnostics.Stopwatch _rxWatch = System.Diagnostics.Stopwatch.StartNew();
     private CancellationTokenSource? _cts;
     private int _started;
     private readonly ClipboardSync _clipboard = new();
 
-    public event Action<byte[]>? FrameReceived;
+    /// <summary>Готовый кадр для показа (уже декодированный).</summary>
+    public event Action<Bitmap>? FrameDecoded;
+
     public event Action<string>? StatusChanged;
     public event Action? Connected;
 
     /// <summary>Сессия завершилась (канал закрыт, сервер закончил или ошибка) — UI возвращается к стартовому экрану.</summary>
     public event Action? Ended;
 
-    public ViewerSession(SignalingClient client, string targetId)
+    public ViewerSession(SignalingClient client, string targetId, VideoCodec codec = VideoCodec.Mjpeg)
     {
         _client = client;
         _targetId = targetId;
+        _codec = codec;
+        _decoder = codec == VideoCodec.H264 ? new H264Decoder() : null;
     }
 
     /// <summary>Запускает цикл сессии; повторный вызов (например, из OnShown встроенной формы) игнорируется.</summary>
@@ -94,7 +104,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
     private async Task SendOfferAsync(CancellationToken ct)
     {
-        var peer = new WebRtcPeer(offerer: true);
+        var peer = new WebRtcPeer(offerer: true, _codec);
         _peer = peer;
 
         peer.LocalSignal += signal =>
@@ -116,7 +126,7 @@ public sealed class ViewerSession : IAsyncDisposable
                 _rxWatch.Restart();
             }
 
-            FrameReceived?.Invoke(frame);
+            OnRemoteFrame(frame);
         };
 
         peer.Connected += () =>
@@ -148,10 +158,54 @@ public sealed class ViewerSession : IAsyncDisposable
             Ended?.Invoke();
         };
 
-        var offer = await peer.CreateOfferAsync(ct);
+        var offer = (Dictionary<string, object?>)await peer.CreateOfferAsync(ct);
+        offer["codec"] = _codec.ToWire();
         await _client.SignalAsync(_sessionId!, "offer", offer, ct);
         _offerSent = true;
         StatusChanged?.Invoke("offer отправлен, ждём ответ");
+    }
+
+    /// <summary>Пришёл кадр от хоста: JPEG или H.264 access unit.</summary>
+    private void OnRemoteFrame(byte[] frame)
+    {
+        Bitmap? bitmap;
+
+        if (_decoder is not null)
+        {
+            try
+            {
+                bitmap = _decoder.Decode(frame);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"h264: декодирование упало: {ex.Message}");
+                bitmap = null;
+            }
+
+            // Кадр не собрался — просим IDR, но не чаще раза в 2 с.
+            if (bitmap is null && DateTime.UtcNow - _lastKeyframeRequest > TimeSpan.FromSeconds(2))
+            {
+                _lastKeyframeRequest = DateTime.UtcNow;
+                _peer?.SendControl("{\"t\":\"kf\"}");
+            }
+        }
+        else
+        {
+            try
+            {
+                using var stream = new MemoryStream(frame);
+                bitmap = new Bitmap(stream);
+            }
+            catch (ArgumentException)
+            {
+                bitmap = null;
+            }
+        }
+
+        if (bitmap is not null)
+        {
+            FrameDecoded?.Invoke(bitmap);
+        }
     }
 
     private async Task HandleSignalAsync(SignalMessage message, CancellationToken ct)
@@ -191,5 +245,8 @@ public sealed class ViewerSession : IAsyncDisposable
             await _peer.DisposeAsync();
             _peer = null;
         }
+
+        _decoder?.Dispose();
+        _decoder = null;
     }
 }

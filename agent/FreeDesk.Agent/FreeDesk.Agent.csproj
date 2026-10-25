@@ -23,4 +23,13 @@
     <PackageReference Include="System.Drawing.Common" Version="9.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- OpenH264 (Cisco, BSD): H.264-кодек для удалённого экрана. Лежит рядом с exe,
+         а не внутри single-file бандла: нативная загрузка ищет её в каталоге приложения. -->
+    <None Include="Native\openh264.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Link="openh264.dll" />
+  </ItemGroup>
+
 </Project>

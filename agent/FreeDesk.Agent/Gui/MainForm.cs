@@ -630,7 +630,7 @@ public sealed class MainForm : ModernWindow
         {
             Disconnect(keepStatus: true);
 
-            _session = new ViewerSession(_client, target);
+            _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec));
             var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             _session.Connected += () => connected.TrySetResult(true);
             _session.StatusChanged += text => SetStatus(text, Ui.Amber);

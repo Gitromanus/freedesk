@@ -25,6 +25,12 @@ public sealed class AgentConfig
     /// <summary>Качество JPEG (10..100).</summary>
     public long JpegQuality { get; set; } = 80;
 
+    /// <summary>Кодек видео: h264 (openh264) либо mjpeg.</summary>
+    public string Codec { get; set; } = "h264";
+
+    /// <summary>Целевой битрейт H.264, кбит/с.</summary>
+    public int BitrateKbps { get; set; } = 3000;
+
     /// <summary>Ширина кадра после масштабирования (0 — без масштабирования).</summary>
     public int MaxWidth { get; set; } = 1920;
 

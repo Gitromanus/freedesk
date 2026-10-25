@@ -22,7 +22,7 @@ public sealed class ViewerForm : ModernWindow
     };
 
     private Bitmap? _current;
-    private byte[]? _pending;
+    private Bitmap? _pending;
     private int _scheduled;
     private int _rendered;
     private bool _dirty;
@@ -71,7 +71,7 @@ public sealed class ViewerForm : ModernWindow
             e.Graphics.DrawImage(_current, rect);
         };
 
-        _session.FrameReceived += OnFrame;
+        _session.FrameDecoded += OnFrame;
         _session.StatusChanged += OnStatus;
 
         var displayTimer = new System.Windows.Forms.Timer { Interval = 33 };
@@ -97,6 +97,7 @@ public sealed class ViewerForm : ModernWindow
     {
         _ = _session.DisposeAsync();
         _current?.Dispose();
+        Interlocked.Exchange(ref _pending, null)?.Dispose();
         base.OnFormClosed(e);
     }
 
@@ -106,9 +107,16 @@ public sealed class ViewerForm : ModernWindow
         BeginInvoke(() => _status.Text = text);
     }
 
-    private void OnFrame(byte[] jpeg)
+    private void OnFrame(Bitmap bitmap)
     {
-        Interlocked.Exchange(ref _pending, jpeg);
+        if (IsDisposed)
+        {
+            bitmap.Dispose();
+            return;
+        }
+
+        var previous = Interlocked.Exchange(ref _pending, bitmap);
+        previous?.Dispose();
 
         if (Interlocked.Exchange(ref _scheduled, 1) == 0)
         {
@@ -127,19 +135,8 @@ public sealed class ViewerForm : ModernWindow
     {
         Interlocked.Exchange(ref _scheduled, 0);
 
-        var data = Interlocked.Exchange(ref _pending, null);
-        if (data is null) return;
-
-        Bitmap bitmap;
-        try
-        {
-            using var stream = new MemoryStream(data);
-            bitmap = new Bitmap(stream);
-        }
-        catch (ArgumentException)
-        {
-            return;
-        }
+        var bitmap = Interlocked.Exchange(ref _pending, null);
+        if (bitmap is null) return;
 
         if (_rendered == 0)
         {
@@ -153,7 +150,7 @@ public sealed class ViewerForm : ModernWindow
         previous?.Dispose();
         _dirty = true;
 
-        _status.Text = $"Подключено · {_rendered} кадров · {data.Length / 1024} КБ";
+        _status.Text = $"Подключено · {_rendered} кадров · {bitmap.Width}×{bitmap.Height}";
     }
 
     private void OnMouseMove(object? sender, MouseEventArgs e)

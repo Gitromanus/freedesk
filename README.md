@@ -15,40 +15,53 @@
 подключается по 9-значному ID и видит удалённый рабочий стол.
 
 - сигналинг — HTTPS-поллинг через `fd.cherubino74.ru`;
-- медиа — P2P WebRTC, **MJPEG по RTP** (не через data channel: SCTP в SIPSorcery
-  упирается в ~300 КБ/с из-за `MAX_BURST = 4` пакета на SACK);
+- медиа — P2P WebRTC, RTP. Кодек выбирает зритель и передаёт его в offer'е:
+  **H.264** (OpenH264, по умолчанию) либо **MJPEG**. Видео не идёт через data channel:
+  SCTP в SIPSorcery упирается в ~300 КБ/с из-за `MAX_BURST = 4` пакета на SACK;
+- H.264 — `Annex B` access unit'ы, FU-A пакетизация штатная (SIPSorcery),
+  ключевой кадр раз в 5 с и по запросу зрителя (`{"t":"kf"}`), если декодер сбился;
 - управление (мышь/клавиатура) — data channel, JSON;
 - **текстовый буфер обмена** синхронизируется в обе стороны (data channel,
   `{"t":"cb","v":...}`, эхо подавляется);
 - **курсор рисуется в кадре**: GDI — DrawIconEx с реальным указателем, DXGI —
   синтетическая стрелка с патчем фона (видна даже на неподвижном экране);
 - **автопереподключение** зрителя при обрыве: до 3 попыток с паузой 2 с;
-- статичные кадры не отправляются (побайтовое сравнение с предыдущим кадром),
-  но раз в 5 с последний кадр пересылается — зритель восстанавливается после
-  потери RTP-пакета на неподвижном экране; простой почти не тратит трафик;
+- статичный экран: в MJPEG кадры не отправляются вовсе (побайтовое сравнение),
+  раз в 5 с пересылается последний — зритель восстанавливается после потери
+  RTP-пакета; в H.264 кадры идут постоянно, но на статике это ~1 КБ P-кадры;
 - захват — DXGI Desktop Duplication с откатом на GDI BitBlt (`--capture auto|dxgi|gdi`);
   в RDP-сессиях DXGI отдаёт пустые кадры — детектор замечает это за два кадра
-  и стример сам переходит на GDI;
-- кодирование — JPEG с масштабированием до 1920 px.
+  и стример сам переходит на GDI (и больше не возвращается);
+- кодирование — H.264 (openh264) либо JPEG с масштабированием до `max-width`.
 
-Измерено на 2560×1440 (GDI): 12 fps, ~70 КБ/кадр, ~7 Мбит/с при активном экране,
-~0 Мбит/с в покое (один кадр раз в 5 с). DXGI на консольной сессии даёт ~47 fps
-на захват+кодирование против ~19 у GDI.
+Измерено на этой машине (2560×1440, GDI, кадр 1600×900):
+
+| Кодек | fps | На кадр | Трафик (активный экран) | В покое |
+|---|---|---|---|---|
+| H.264 | ~12 | ~21 мс (захват+кодирование) | 3–5 КБ/кадр, 0,3–0,5 Мбит/с | 0,1 Мбит/с |
+| MJPEG | 15 | — | ~60 КБ/кадр, ~7,5 Мбит/с | ~0 (кадр раз в 5 с) |
+
+DXGI на консольной сессии даёт ~47 fps на захват+кодирование против ~19 у GDI.
 
 ## Структура
 
 ```
 agent/FreeDesk.Agent/            клиент (C#, .NET 9, Windows)
-  PeerTransport.cs               WebRTC: MJPEG/RTP + data channel
+  PeerTransport.cs               WebRTC: RTP (H.264/MJPEG) + data channel
   AgentRuntime.cs                цикл агента: presence, приём заявок, сессии
-  ViewerSession.cs               сторона зрителя
+  ViewerSession.cs               сторона зрителя: приём, декод, ввод
   Gui/Ui.cs                      палитра, кастомные контролы, окно с WM_NCHITTEST
   Gui/MainForm.cs                главное окно: ID, подключение, недавние, просмотр
-  Gui/SettingsDialog.cs          настройки: имя, сервер, fps/качество/ширина, захват
+  Gui/SettingsDialog.cs          настройки: имя, сервер, кодек/fps/битрейт, захват
   Gui/PromptDialog.cs            модальные диалоги (входящий запрос, переименование)
   Viewer/ViewerForm.cs           окно просмотра, мышь/клавиатура
-  ScreenStreamer.cs              захват → JPEG → RTP, пропуск статичных кадров
+  ScreenStreamer.cs              захват → H.264/JPEG → RTP, keyframe по расписанию
   ClipboardSync.cs               синхронизация текстового буфера обмена
+  Codec/H264Encoder.cs           OpenH264: BGRA → I420 → Annex B (screen content)
+  Codec/H264Decoder.cs           OpenH264: Annex B → BGRA Bitmap
+  Codec/BgraScaler.cs            масштабирование кадра (bilinear) до max-width
+  VideoCodec.cs                  h264 | mjpeg, разбор значения из конфига/offer
+  Native/openh264.dll            кодек Cisco (BSD), кладётся рядом с exe
   Capture/CaptureFactory.cs      выбор источника: dxgi с откатом на gdi
   Capture/DxgiScreenCapture.cs   Desktop Duplication (COM-интероп без зависимостей)
   Capture/GdiScreenCapture.cs    BitBlt/PrintWindow + курсор, работает в RDP-сессиях
@@ -92,7 +105,8 @@ dotnet build agent/FreeDesk.Agent/FreeDesk.Agent.csproj
 | `--input-test <id>` | проверка ввода без окна |
 | `--auto-accept` | принимать входящие без Enter |
 | `--fps <1..60>` | частота кадров (по умолчанию 12) |
-| `--quality <10..100>` | качество JPEG (по умолчанию 80) |
+| `--codec <кодек>` | видео: `h264` (по умолчанию) \| `mjpeg` |
+| `--quality <10..100>` | качество JPEG (по умолчанию 80, только MJPEG) |
 | `--max-width <px>` | ширина кадра, 0 — без масштабирования (1920) |
 | `--capture <режим>` | захват экрана: `auto` \| `dxgi` \| `gdi` (по умолчанию auto) |
 | `--profile <имя>` | файл конфига `%APPDATA%\FreeDesk\<имя>.json` |
@@ -109,6 +123,7 @@ agent\publish\FreeDesk.exe        GUI-приложение (WinExe): двойн�
                                   только окно, без терминала; консольные флаги
                                   из терминала тоже работают (AttachConsole)
 agent\publish\freedesk-agent.exe  консольная версия для скриптов и тестов
+agent\publish\openh264.dll       кодек H.264 — обязательно рядом с exe
 ```
 
 Окно без системной рамки, но с нативным поведением (перетаскивание, ресайз за
@@ -142,7 +157,7 @@ agent\publish\freedesk-agent.exe  консольная версия для ск�
 | POST | `/api/v1/session/request` | `{target_id}` → `session_id` (state=pending) |
 | GET | `/api/v1/session/incoming` | входящие заявки |
 | POST | `/api/v1/session/answer` | `{session_id, action: accept\|reject\|end}` |
-| POST | `/api/v1/session/signal` | `{session_id, type, payload}` — offer/answer/ice |
+| POST | `/api/v1/session/signal` | `{session_id, type, payload}` — offer/answer/ice; в offer `payload.codec` = `h264`\|`mjpeg` |
 | GET | `/api/v1/session/poll` | `?session_id&since&wait` — сообщения после курсора |
 
 `device_token` показывается клиенту один раз: в базе лежит только `sha256`.
@@ -220,10 +235,10 @@ coturn рядом, API и панель остаются на Beget.
 
 ## Что дальше
 
-1. **H.264 вместо MJPEG**: Media Foundation/NVENC на агенте, декод на зрителе.
-   Даёт 1–2 Мбит/с вместо 7 и резкость текста.
-2. Отрисовка курсора в кадре (метаданные указателя из DXGI) — сейчас зритель
-   видит только свой локальный курсор.
+1. **Аппаратное кодирование** (NVENC/QSV через Media Foundation): OpenH264 тратит
+   ~20 мс/кадр на 1600×900 — на 1080p+ это упирается в CPU.
+2. Адаптивный битрейт: смотреть RTCP-отчёты и менять `TargetBitrate` на лету,
+   вместо фиксированных 3000 кбит/с.
 3. Аккаунты и адресная книга (`users`/`user_devices` уже в схеме).
 4. Unattended access: argon2id-пароль на устройстве, подключение без подтверждения.
 5. TURN-пул на VPS (сейчас только STUN, симметричный NAT не пройдёт).

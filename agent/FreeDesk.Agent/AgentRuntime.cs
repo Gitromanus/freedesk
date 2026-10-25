@@ -94,7 +94,7 @@ public sealed class AgentRuntime
         };
 
         // Инициатор — он же оффер: экран показывает сторона, которая приняла заявку.
-        AttachTransport(session, offerer: true);
+        AttachTransport(session, offerer: true, VideoCodecNames.Parse(_config.Codec));
         _sessions[result.SessionId] = session;
     }
 
@@ -217,13 +217,14 @@ public sealed class AgentRuntime
             State = "active",
         };
 
-        AttachTransport(session, offerer: false);
+        // Транспорт создаём при получении offer: только тогда известен кодек зрителя
+        // (его трек должен совпасть с нашей m-line).
         _sessions[item.SessionId] = session;
     }
 
-    private void AttachTransport(ActiveSession session, bool offerer)
+    private void AttachTransport(ActiveSession session, bool offerer, VideoCodec codec)
     {
-        var peer = new WebRtcPeer(offerer);
+        var peer = new WebRtcPeer(offerer, codec);
         session.Transport = peer;
 
         peer.LocalSignal += signal =>
@@ -240,7 +241,7 @@ public sealed class AgentRuntime
 
             Log.Info($"канал установлен: {session.PeerName}");
             session.Streamer = new ScreenStreamer(
-                peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture);
+                peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture, _config.BitrateKbps);
             session.Streamer.Start();
             StatusChanged?.Invoke($"Подключено: {session.PeerName}");
             SessionStarted?.Invoke();
@@ -328,10 +329,11 @@ public sealed class AgentRuntime
         switch (message.Type)
         {
             case "offer":
-                AttachTransportIfNeeded(session);
+                var offerCodec = ReadCodec(message.Payload);
+                AttachTransportIfNeeded(session, offerCodec);
                 var answer = await session.Transport!.CreateAnswerAsync(message.Payload, ct);
                 await _client.SignalAsync(session.Id, "answer", answer, ct);
-                Log.Info($"offer получен, answer отправлен: {session.PeerName}");
+                Log.Info($"offer получен ({offerCodec.ToWire()}), answer отправлен: {session.PeerName}");
                 break;
 
             case "answer":
@@ -370,6 +372,13 @@ public sealed class AgentRuntime
                 session.Clipboard.Incoming(root);
                 return;
             }
+
+            // зритель не смог декодировать кадр — просит ключевой
+            if (root.TryGetProperty("t", out type) && type.GetString() == "kf")
+            {
+                session.Streamer?.RequestKeyframe();
+                return;
+            }
         }
         catch (JsonException)
         {
@@ -398,13 +407,19 @@ public sealed class AgentRuntime
         }
     }
 
-    private void AttachTransportIfNeeded(ActiveSession session)
+    private void AttachTransportIfNeeded(ActiveSession session, VideoCodec codec)
     {
         if (session.Transport is null)
         {
-            AttachTransport(session, offerer: session.Role == "host");
+            AttachTransport(session, offerer: session.Role == "host", codec);
         }
     }
+
+    /// <summary>Кодек, который зритель указал в offer; старые клиенты поля не шлют.</summary>
+    private static VideoCodec ReadCodec(JsonElement payload) =>
+        payload.TryGetProperty("codec", out var value)
+            ? VideoCodecNames.Parse(value.GetString())
+            : VideoCodec.Mjpeg;
 
     private async Task CloseSessionAsync(ActiveSession session)
     {

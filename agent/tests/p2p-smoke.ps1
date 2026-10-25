@@ -1,6 +1,8 @@
 param(
     [int]$Seconds = 25,
     [string]$HostArgs = '',
+    [ValidateSet('h264', 'mjpeg')]
+    [string]$Codec = 'h264',
     [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
 )
 
@@ -24,7 +26,7 @@ $viewLog = Join-Path $env:TEMP 'fd-viewer.log'
 Remove-Item $hostLog, $viewLog, "$hostLog.err", "$viewLog.err" -ErrorAction SilentlyContinue
 
 Write-Host 'starting host agent ...'
-$hostArgList = @('--profile', 'host', '--name', 'host-pc', '--auto-accept')
+$hostArgList = @('--profile', 'host', '--name', 'host-pc', '--auto-accept', '--codec', $Codec)
 if ($HostArgs) { $hostArgList += $HostArgs.Split(' ') }
 $hostAgent = Start-Process -FilePath $AgentExe `
     -ArgumentList $hostArgList `
@@ -47,7 +49,7 @@ try {
 
     Write-Host 'starting viewer ...'
     $viewer = Start-Process -FilePath $AgentExe `
-        -ArgumentList '--profile', 'viewer', '--name', 'viewer-pc', '--view', $hostId `
+        -ArgumentList '--profile', 'viewer', '--name', 'viewer-pc', '--view', $hostId, '--codec', $Codec `
         -RedirectStandardOutput $viewLog -RedirectStandardError "$viewLog.err" `
         -PassThru -NoNewWindow
 

@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 using FreeDesk.Agent;
+using FreeDesk.Agent.Codec;
 using FreeDesk.Agent.Gui;
 using FreeDesk.Agent.Viewer;
 
@@ -50,6 +51,7 @@ string? inputTestTarget = null;
 bool guiMode = guiRequested;
 var captureTestFrames = 0;
 long captureQuality = 70;
+var captureCodec = "mjpeg";
 
 for (var i = 0; i < args.Length; i++)
 {
@@ -78,6 +80,11 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--input-test" when i + 1 < args.Length:
             inputTestTarget = args[++i];
+            break;
+        case "--codec" when i + 1 < args.Length:
+            var codec = args[++i].ToLowerInvariant();
+            captureCodec = codec is "mjpeg" or "h264" ? codec : "mjpeg";
+            config.Codec = captureCodec;
             break;
         case "--capture-test":
             if (i + 1 < args.Length && int.TryParse(args[i + 1], out var frameCount))
@@ -127,7 +134,8 @@ for (var i = 0; i < args.Length; i++)
                   --fps <1..60>        частота кадров (по умолчанию 15)
                   --max-width <px>     ширина кадра после масштабирования (0 — без сжатия)
                   --capture <режим>    захват экрана: auto | dxgi | gdi (по умолчанию auto)
-                  --capture-test [N]   снять N кадров экрана и сохранить один в JPEG
+                  --capture-test [N]   снять N кадров, закодировать и сохранить в %TEMP%
+                  --codec <кодек>      видео: h264 (openh264) | mjpeg
                   --quality <10..100>  качество JPEG (по умолчанию 70)
                 """);
             return 0;
@@ -139,8 +147,16 @@ for (var i = 0; i < args.Length; i++)
 
 if (captureTestFrames > 0)
 {
-    await CaptureTest.RunAsync(captureTestFrames, captureQuality, config.MaxWidth, config.Capture);
+    await CaptureTest.RunAsync(captureTestFrames, captureQuality, config.MaxWidth, config.Capture, captureCodec);
     return 0;
+}
+
+// Без openh264.dll H.264 невозможен — лучше явно откатиться на MJPEG, чем
+// упасть на первой сессии. Проверяем свою машину: и зритель, и хост идут одним бинарником.
+if (VideoCodecNames.Parse(config.Codec) == VideoCodec.H264 && !H264Decoder.IsAvailable())
+{
+    Log.Warn("openh264.dll не найдена рядом с exe — переключаюсь на mjpeg");
+    config.Codec = "mjpeg";
 }
 
 using var cts = new CancellationTokenSource();
@@ -184,7 +200,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget);
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec));
 }
 
 if (inputTestTarget is not null)
@@ -247,9 +263,9 @@ static void TryAttachParentConsole()
 
 static string PickFreeProfile() => ProfilePicker.Pick();
 
-static int RunViewer(SignalingClient client, string targetId)
+static int RunViewer(SignalingClient client, string targetId, VideoCodec codec)
 {
-    var session = new ViewerSession(client, targetId);
+    var session = new ViewerSession(client, targetId, codec);
     var exitCode = 0;
 
     // WinForms требует STA — создаём отдельный поток, чтобы не зависеть от
