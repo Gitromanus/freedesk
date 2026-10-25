@@ -11,14 +11,12 @@ public sealed class AgentConfig
     public string? DeviceToken { get; set; }
     public string? PublicId { get; set; }
 
-    /// <summary>Принимать входящие подключения без подтверждения.</summary>
-    public bool AutoAccept { get; set; }
-
-    public int PresenceSeconds { get; set; } = 15;
-    public int PollSeconds { get; set; } = 1;
-
     /// <summary>Частота кадров при стриминге.</summary>
     public int Fps { get; set; } = 12;
+
+    /// <summary>Настройки опроса — оставлены для совместимости со старыми профилями.</summary>
+    public int PresenceSeconds { get; set; } = 15;
+    public int PollSeconds { get; set; } = 1;
 
     /// <summary>Способ захвата экрана: auto | dxgi | gdi.</summary>
     public string Capture { get; set; } = "auto";

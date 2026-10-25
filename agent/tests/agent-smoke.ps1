@@ -1,5 +1,6 @@
-param(
+﻿param(
     [string]$Base = 'https://fd.cherubino74.ru',
+    [string]$Password = 'smoke-pass-1',
     [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
 )
 
@@ -37,8 +38,7 @@ function Invoke-Api {
     }
 }
 
-function Read-Log([string]$path) {
-    if (-not (Test-Path $path)) { return '' }
+function Read-Log([string]$path) {    if (-not (Test-Path $path)) { return '' }
     try {
         $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
         $reader = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
@@ -50,11 +50,14 @@ function Read-Log([string]$path) {
 
 if (-not (Test-Path $AgentExe)) { throw "agent not built: $AgentExe" }
 
+# Пароль устройства: автоприём убран, автоматическое подключение — только по паролю.
+& $AgentExe --set-password $Password | Out-Null
+
 $logFile = Join-Path $env:TEMP 'freedesk-agent-smoke.log'
 Remove-Item $logFile -ErrorAction SilentlyContinue
 
 Write-Host "starting agent ..."
-$agent = Start-Process -FilePath $AgentExe -ArgumentList '--auto-accept' `
+$agent = Start-Process -FilePath $AgentExe -ArgumentList '--codec','mjpeg' `
     -RedirectStandardOutput $logFile -RedirectStandardError "$logFile.err" `
     -PassThru -NoNewWindow
 
@@ -78,13 +81,47 @@ try {
     Write-Host ("  [ok] peer registered: {0}" -f $peer.public_id)
 
     Invoke-Api -Method POST -Path '/api/v1/presence' -Token $peer.device_token | Out-Null
-    Invoke-Api -Method POST -Path '/api/v1/presence' -Token (Get-Content "$env:APPDATA\FreeDesk\agent.json" -Raw | ConvertFrom-Json).deviceToken | Out-Null
+    $configPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'FreeDesk\agent.json'
+    Invoke-Api -Method POST -Path '/api/v1/presence' -Token (Get-Content $configPath -Raw | ConvertFrom-Json).deviceToken | Out-Null
 
     $req = Invoke-Api -Method POST -Path '/api/v1/session/request' -Token $peer.device_token -Body @{ target_id = $agentId }
     $sid = $req.session_id
     Write-Host ("  [ok] request sent: {0}" -f $sid)
 
-    # Агент должен принять сам (--auto-accept).
+    # Хост присылает challenge (PBKDF2), отвечаем proof — как это делает клиент.
+    $challenge = $null
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 500
+        $poll = Invoke-Api -Method GET -Path "/api/v1/session/poll?session_id=$sid&since=0" -Token $peer.device_token
+        $challenge = @($poll.messages | Where-Object { $_.type -eq 'challenge' })
+        if ($challenge.Count -ge 1) { break }
+    }
+
+    if ($challenge.Count -lt 1) { throw "agent did not send a challenge`n$(Read-Log $logFile)" }
+
+    $payload = $challenge[-1].payload
+    $iterations = [int]$payload.iterations
+    $salt = [Convert]::FromBase64String($payload.salt)
+    $nonce = [Convert]::FromBase64String($payload.nonce)
+
+    $kdf1 = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+        [Text.Encoding]::UTF8.GetBytes($Password), $salt, $iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $hash = $kdf1.GetBytes(32)
+    $kdf1.Dispose()
+
+    $kdf2 = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+        $hash, $nonce, $iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    $proof = [Convert]::ToBase64String($kdf2.GetBytes(32))
+    $kdf2.Dispose()
+
+    Invoke-Api -Method POST -Path '/api/v1/session/signal' -Token $peer.device_token -Body @{
+        session_id = $sid
+        type       = 'auth'
+        payload    = @{ proof = $proof }
+    } | Out-Null
+
+    Write-Host '  [ok] challenge answered'
+
     $state = $null
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Milliseconds 500
@@ -96,31 +133,15 @@ try {
     if ($state -ne 'active') { throw "agent did not accept, state=$state`n$(Read-Log $logFile)" }
     Write-Host '  [ok] agent accepted the session'
 
-    Invoke-Api -Method POST -Path '/api/v1/session/signal' -Token $peer.device_token -Body @{
-        session_id = $sid
-        type       = 'offer'
-        payload    = @{ type = 'offer'; sdp = 'smoke-test-offer' }
-    } | Out-Null
-
-    $answer = $null
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 500
-        $poll = Invoke-Api -Method GET -Path "/api/v1/session/poll?session_id=$sid&since=0" -Token $peer.device_token
-        $answer = @($poll.messages | Where-Object { $_.type -eq 'answer' })
-        if ($answer.Count -ge 1) { break }
-    }
-
-    if ($answer.Count -lt 1) { throw "agent did not answer the offer`n$(Read-Log $logFile)" }
-    Write-Host ("  [ok] agent answered: sdp={0}" -f $answer[0].payload.sdp)
-
     Invoke-Api -Method POST -Path '/api/v1/session/answer' -Token $peer.device_token -Body @{
         session_id = $sid; action = 'end'
     } | Out-Null
 
     Write-Host ''
-    Write-Host 'PASS — агент регистрируется, принимает заявку и отвечает на offer.'
+    Write-Host 'PASS — агент регистрируется, проверяет пароль (challenge-response) и принимает заявку.'
     Write-Host ("  agent: {0}" -f $agentId)
 }
 finally {
     if (-not $agent.HasExited) { Stop-Process -Id $agent.Id -Force }
 }
+

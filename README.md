@@ -103,7 +103,7 @@ server/
 dotnet build agent/FreeDesk.Agent/FreeDesk.Agent.csproj
 
 # агент: показать свой ID и принимать подключения
-.\agent\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe --auto-accept
+.\agent\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe
 
 # зритель: открыть окно с чужим экраном
 ... --view 123456789
@@ -118,7 +118,7 @@ dotnet build agent/FreeDesk.Agent/FreeDesk.Agent.csproj
 | `--settings` | открыть окно приложения сразу с настройками |
 | `--connect <id>` | инициировать сессию без окна |
 | `--input-test <id>` | проверка ввода без окна |
-| `--auto-accept` | принимать входящие без Enter |
+| `--auto-accept` | (убран) раньше принимал всех без подтверждения |
 | `--fps <1..60>` | частота кадров (по умолчанию 12) |
 | `--codec <кодек>` | видео: `h264` (по умолчанию) \| `mjpeg` |
 | `--quality <10..100>` | качество JPEG (по умолчанию 80, только MJPEG) |
@@ -177,7 +177,7 @@ dotnet build agent/FreeDesk.Agent/FreeDesk.Agent.csproj
 
 - пароль не уходит ни на сервер, ни зрителю — в сигналах только nonce и proof;
 - в конфиге лежат соль, итерации (120 000) и хеш: файл профиля — секрет;
-- пароль сильнее автоприёма: если он задан, `--auto-accept` не отменяет проверку;
+- без пароля заявка всегда требует подтверждения человека: автоприём убран, чтобы угаданный ID не давал полный доступ;
 - зритель без `--password` получает запрос пароля в окне (в headless — отказ).
 
 ## Файлы и адаптивный битрейт

@@ -1,9 +1,11 @@
-param(
+﻿param(
     [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
 )
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
+
+$Password = 'input-test-1'
 
 function Read-Log([string]$path) {
     if (-not (Test-Path $path)) { return '' }
@@ -17,8 +19,10 @@ function Read-Log([string]$path) {
 $hostLog = Join-Path $env:TEMP 'fd-input-host.log'
 Remove-Item $hostLog, "$hostLog.err" -ErrorAction SilentlyContinue
 
+& $AgentExe --profile host --set-password $Password | Out-Null
+
 $hostAgent = Start-Process -FilePath $AgentExe `
-    -ArgumentList '--profile', 'host', '--name', 'host-pc', '--auto-accept' `
+    -ArgumentList '--profile', 'host', '--name', 'host-pc' `
     -RedirectStandardOutput $hostLog -RedirectStandardError "$hostLog.err" `
     -PassThru -NoNewWindow
 
@@ -36,7 +40,7 @@ try {
     $before = [System.Windows.Forms.Cursor]::Position
     Write-Host ("cursor before: {0},{1}" -f $before.X, $before.Y)
 
-    & $AgentExe --profile viewer --name viewer-pc --input-test $hostId 2>&1 | ForEach-Object { Write-Host "  $_" }
+    & $AgentExe --profile viewer --name viewer-pc --input-test $hostId --password $Password 2>&1 | ForEach-Object { Write-Host "  $_" }
 
     Start-Sleep -Milliseconds 500
     $after = [System.Windows.Forms.Cursor]::Position
@@ -52,3 +56,4 @@ finally {
 Write-Host ''
 Write-Host '--- host log ---'
 Read-Log $hostLog
+

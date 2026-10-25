@@ -28,7 +28,6 @@ public sealed class MainForm : ModernWindow
     private readonly Label _statusText = new();
     private readonly UiInput _targetInput = new("9-значный ID");
     private readonly UiButton _connectBtn = new("Подключиться");
-    private readonly UiToggle _autoAccept = new("Принимать входящие\nавтоматически");
     private readonly ListBox _recentList = new();
     private readonly Label _recentEmpty = new();
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronLeft);
@@ -177,17 +176,6 @@ public sealed class MainForm : ModernWindow
         _connectBtn.Click += (_, _) => _ = ConnectAsync();
         y += 62;
 
-        _autoAccept.Location = new Point(x, y);
-        _autoAccept.Width = w;
-        _autoAccept.Height = 40;
-        _autoAccept.Checked = _config.AutoAccept;
-        _autoAccept.CheckedChanged += (_, _) =>
-        {
-            _config.AutoAccept = _autoAccept.Checked;
-            _config.Save();
-        };
-        y += 46;
-
         Separator(y);
         y += 26;
 
@@ -253,7 +241,7 @@ public sealed class MainForm : ModernWindow
         _sidebar.Controls.AddRange(new Control[]
         {
             idCaption, _idLabel, idHint, _statusText,
-            _targetInput, _connectBtn, _autoAccept,
+            _targetInput, _connectBtn,
             _recentList, _recentEmpty, _collapseBtn, _settingsBtn,
         });
         _sidebar.BringToFront();

@@ -155,7 +155,8 @@ for (var i = 0; i < args.Length; i++)
             config.Display = displayArg.Value;
             break;
         case "--auto-accept":
-            config.AutoAccept = true;
+            Console.Error.WriteLine("--auto-accept убран: без пароля подключение требует подтверждения," +
+                                    " а для автоматического задайте пароль (--set-password)");
             break;
         case "--reset":
             config.DeviceToken = null;
@@ -177,7 +178,7 @@ for (var i = 0; i < args.Length; i++)
                   --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти
                   --clear-password     удалить сохранённый пароль профиля и выйти
                   --profile <имя>      отдельный профиль (несколько агентов на машине)
-                  --auto-accept        принимать входящие без подтверждения
+                  --auto-accept        (убран) раньше принимал входящие без подтверждения
                   --reset              забыть токен и зарегистрироваться заново
                   --fps <1..60>        частота кадров (по умолчанию 15)
                   --max-width <px>     ширина кадра после масштабирования (0 — без сжатия)
@@ -286,7 +287,7 @@ Console.WriteLine("  FreeDesk agent v" + (typeof(Program).Assembly.GetName().Ver
 Console.WriteLine($"  ID:     {FormatId(config.PublicId ?? "?")}");
 Console.WriteLine($"  Имя:    {config.Name}");
 Console.WriteLine($"  Сервер: {config.Server}");
-Console.WriteLine($"  Приём:  {(config.AutoAccept ? "автоматически" : "по подтверждению (Enter)")}");
+Console.WriteLine($"  Приём:  {(config.HasUnattendedPassword ? "по паролю устройства" : "по подтверждению (Enter)")}");
 Console.WriteLine();
 
 if (viewTarget is not null)
@@ -296,7 +297,7 @@ if (viewTarget is not null)
 
 if (inputTestTarget is not null)
 {
-    return RunInputTest(client, inputTestTarget);
+    return RunInputTest(client, inputTestTarget, viewPassword);
 }
 
 if (guiMode)
@@ -404,9 +405,9 @@ static int RunViewer(
 /// <summary>
 /// Проверка ввода без окна: подключается, двигает мышь, кликает и жмёт клавишу.
 /// </summary>
-static int RunInputTest(SignalingClient client, string targetId)
+static int RunInputTest(SignalingClient client, string targetId, string? password = null)
 {
-    var session = new ViewerSession(client, targetId);
+    var session = new ViewerSession(client, targetId, VideoCodec.Mjpeg, password ?? string.Empty);
     var connected = new ManualResetEventSlim();
 
     session.Connected += () => connected.Set();

@@ -19,7 +19,7 @@ public sealed class AgentRuntime
     private DateTime _lastPresence = DateTime.MinValue;
     private readonly HashSet<string> _prompted = new();
 
-    /// <summary>Вызывается при входящей заявке, если AutoAccept=false. Верните true для принятия.</summary>
+    /// <summary>Вызывается при входящей заявке без пароля. Верните true для принятия.</summary>
     public Func<IncomingItem, Task<bool>>? AcceptPrompt { get; set; }
 
     /// <summary>Текстовый статус для UI (подключение/отключение).</summary>
@@ -130,18 +130,12 @@ public sealed class AgentRuntime
                 continue;
             }
 
-            // Пароль устройства важнее и автоприёма, и подтверждения человеком:
-            // спрашиваем не «разрешить?», а proof от challenge. Битый хеш в конфиге
-            // (нет соли и т.п.) — не повод зависнуть: тогда работает обычный путь.
+            // Пароль устройства важнее любого подтверждения: спрашиваем криптографию.
+            // Битый хеш в конфиге (нет соли и т.п.) — не повод зависнуть: тогда работает
+            // обычный путь с подтверждением человеком.
             if (_config.GetUnattendedSecret() is { } secret)
             {
                 await SendChallengeAsync(item, secret, ct);
-                continue;
-            }
-
-            if (_config.AutoAccept)
-            {
-                await AcceptAsync(item, ct);
                 continue;
             }
 

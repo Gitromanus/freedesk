@@ -1,9 +1,9 @@
-param(
+﻿param(
     [int]$Seconds = 25,
     [string]$HostArgs = '',
     [ValidateSet('h264', 'mjpeg')]
     [string]$Codec = 'h264',
-    [string]$Password = '',
+    [string]$Password = 'test-1234',
     [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
 )
 
@@ -22,7 +22,7 @@ function Read-Log([string]$path) {
 
 if (-not (Test-Path $AgentExe)) { throw "agent not built: $AgentExe" }
 
-# Пароль хоста — в его профиле: с ним проверяем unattended-доступ, без него — обычное подтверждение.
+# Пароль хоста обязателен: автоприём убран, без пароля заявка ждёт человека.
 if ($Password) {
     & $AgentExe --profile host --set-password $Password | Out-Null
 } else {
@@ -34,7 +34,7 @@ $viewLog = Join-Path $env:TEMP 'fd-viewer.log'
 Remove-Item $hostLog, $viewLog, "$hostLog.err", "$viewLog.err" -ErrorAction SilentlyContinue
 
 Write-Host 'starting host agent ...'
-$hostArgList = @('--profile', 'host', '--name', 'host-pc', '--auto-accept', '--codec', $Codec)
+$hostArgList = @('--profile', 'host', '--name', 'host-pc', '--codec', $Codec)
 if ($HostArgs) { $hostArgList += $HostArgs.Split(' ') }
 $hostAgent = Start-Process -FilePath $AgentExe `
     -ArgumentList $hostArgList `
@@ -80,3 +80,4 @@ Write-Host '--- viewer log ---'
 Read-Log $viewLog
 Write-Host '--- viewer stderr ---'
 Read-Log "$viewLog.err"
+
