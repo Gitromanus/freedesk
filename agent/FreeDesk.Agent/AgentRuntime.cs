@@ -31,6 +31,9 @@ public sealed class AgentRuntime
     /// <summary>Сессия закончилась — UI восстанавливается.</summary>
     public event Action? SessionEnded;
 
+    /// <summary>Файл, который надо отдать зрителю сразу после подключения (--send-file).</summary>
+    public string? AutoSendFile { get; set; }
+
     public AgentRuntime(AgentConfig config, SignalingClient client)
     {
         _config = config;
@@ -355,6 +358,7 @@ public sealed class AgentRuntime
     {
         var peer = new WebRtcPeer(offerer, codec);
         session.Transport = peer;
+        session.Sender = new FileSender(peer, text => StatusChanged?.Invoke(text));
 
         peer.LocalSignal += signal =>
             _ = _client.SignalAsync(session.Id, "ice", signal, CancellationToken.None);
@@ -374,6 +378,13 @@ public sealed class AgentRuntime
             session.Streamer.Start();
             StatusChanged?.Invoke($"Подключено: {session.PeerName}");
             SessionStarted?.Invoke();
+
+            // --send-file на стороне хоста: отдать файл подключившемуся зрителю
+            if (!string.IsNullOrEmpty(AutoSendFile))
+            {
+                var path = AutoSendFile;
+                _ = Task.Run(() => SendFileToViewerAsync(path));
+            }
         };
 
         peer.ControlReceived += json =>
@@ -551,10 +562,14 @@ public sealed class AgentRuntime
                 return;
             }
 
-            // файлообмен: предложение, завершение, отмена
+            // файлообмен: сначала ответ на нашу отправку, иначе — входящее
             if (root.TryGetProperty("t", out type) && type.GetString() == "file")
             {
-                HandleFile(session, root);
+                if (session.Sender?.HandleControl(root) != true)
+                {
+                    HandleFile(session, root);
+                }
+
                 return;
             }
         }
@@ -563,6 +578,25 @@ public sealed class AgentRuntime
         }
 
         session.Injector.Handle(json);
+    }
+
+    /// <summary>Есть ли подключённый зритель (наш экран сейчас смотрят).</summary>
+    public bool HasActiveViewer =>
+        _sessions.Values.Any(s => s.Streamer is not null && s.Transport is { IsConnected: true });
+
+    /// <summary>Отправить файл подключённому зрителю — «скачать» с удалённой машины.</summary>
+    public async Task<bool> SendFileToViewerAsync(string path, CancellationToken ct = default)
+    {
+        var session = _sessions.Values.FirstOrDefault(
+            s => s.Streamer is not null && s.Transport is { IsConnected: true } && s.Sender is not null);
+
+        if (session?.Sender is null)
+        {
+            return false;
+        }
+
+        await session.Sender.SendAsync(path, ct);
+        return true;
     }
 
     /// <summary>Предложение файла: принимаем сразу (сессия уже подтверждена) и пишем в Downloads\FreeDesk.</summary>
@@ -593,6 +627,27 @@ public sealed class AgentRuntime
 
             case "done":
                 Log.Info($"передача файла {id} завершена");
+                break;
+
+            case "download":
+                // зритель просит конкретный файл с этой машины
+                var remotePath = root.TryGetProperty("path", out var pathValue) ? pathValue.GetString() : null;
+
+                if (string.IsNullOrWhiteSpace(remotePath) || !File.Exists(remotePath))
+                {
+                    session.Transport?.SendControl(JsonSerializer.Serialize(new
+                    {
+                        t = "file",
+                        op = "error",
+                        reason = "файл не найден: " + remotePath,
+                    }));
+
+                    Log.Warn($"запрошен несуществующий файл: {remotePath}");
+                    break;
+                }
+
+                Log.Info($"зритель скачивает: {remotePath}");
+                _ = Task.Run(() => session.Sender?.SendAsync(remotePath));
                 break;
 
             case "cancel":
@@ -677,5 +732,6 @@ public sealed class AgentRuntime
         public InputInjector Injector { get; } = new();
         public ClipboardSync Clipboard { get; } = new();
         public FileReceiver Files { get; } = new();
+        public FileSender? Sender { get; set; }
     }
 }

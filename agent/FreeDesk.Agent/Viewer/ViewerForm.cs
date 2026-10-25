@@ -129,7 +129,7 @@ public sealed class ViewerForm : ModernWindow
         _powerBtn.Click += RequestDisconnect;
 
         _fileBtn.TabStop = false;
-        _fileBtn.Click += PickAndSendFile;
+        _fileBtn.Click += ShowFileMenu;
 
         // порядок: [мониторы…] [файл] [отключиться] [свернуть]
         _bar.Controls.Add(_fileBtn);
@@ -376,6 +376,15 @@ public sealed class ViewerForm : ModernWindow
         _dirty = true;
     }
 
+    /// <summary>Меню файла: отдать или забрать.</summary>
+    private void ShowFileMenu()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Отправить файл…", null, (_, _) => PickAndSendFile());
+        menu.Items.Add("Скачать файл…", null, (_, _) => PickAndDownloadFile());
+        menu.Show(_bar, new Point(_fileBtn.Left, _bar.Height + 4));
+    }
+
     /// <summary>Выбрать файл и отправить его на удалённую машину.</summary>
     private void PickAndSendFile()
     {
@@ -395,8 +404,24 @@ public sealed class ViewerForm : ModernWindow
         _canvas.Focus();
     }
 
-    private void RequestDisconnect()
+    private async void PickAndDownloadFile()
     {
+        var path = await PromptDialog.AskTextAsync(
+            this,
+            "Скачать файл",
+            "Путь к файлу на удалённой машине",
+            @"C:\Users\Public\Documents");
+
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        _session.RequestDownload(path.Trim());
+        _canvas.Focus();
+    }
+
+    private void RequestDisconnect()    {
         if (DisconnectRequested is { } handler)        {
             handler();
             return;

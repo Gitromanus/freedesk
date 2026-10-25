@@ -195,3 +195,146 @@ public sealed class FileReceiver : IDisposable
         }
     }
 }
+
+/// <summary>
+/// Отправка файлов по data channel. Один экземпляр на сессию: помнит,
+/// какие передачи ждут подтверждения от другой стороны.
+/// </summary>
+public sealed class FileSender
+{
+    private readonly IPeerTransport _peer;
+    private readonly Action<string>? _status;
+    private readonly Dictionary<int, TaskCompletionSource<bool>> _offers = new();
+    private int _counter;
+
+    public FileSender(IPeerTransport peer, Action<string>? status = null)
+    {
+        _peer = peer;
+        _status = status;
+    }
+
+    /// <summary>Ответ на наше предложение (accept/reject). true — сообщение наше.</summary>
+    public bool HandleControl(System.Text.Json.JsonElement root)
+    {
+        var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
+        var id = root.TryGetProperty("id", out var idValue) && idValue.TryGetInt32(out var parsed) ? parsed : 0;
+
+        if (op is not ("accept" or "reject") || !_offers.TryGetValue(id, out var pending))
+        {
+            return false;
+        }
+
+        pending.TrySetResult(op == "accept");
+        return true;
+    }
+
+    /// <summary>Предложить и отправить файл. Ошибки — через статус, без исключений наружу.</summary>
+    public async Task SendAsync(string path, CancellationToken ct = default)
+    {
+        if (!_peer.IsConnected)
+        {
+            _status?.Invoke("нет соединения");
+            return;
+        }
+
+        var info = new FileInfo(path);
+
+        if (!info.Exists)
+        {
+            _status?.Invoke("файл не найден");
+            return;
+        }
+
+        if (info.Length <= 0 || info.Length > FileWire.MaxFileBytes)
+        {
+            _status?.Invoke("файл слишком большой (макс. 2 ГБ)");
+            return;
+        }
+
+        var id = Interlocked.Increment(ref _counter);
+        var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _offers[id] = accepted;
+
+        try
+        {
+            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                t = "file",
+                op = "offer",
+                id,
+                name = info.Name,
+                size = info.Length,
+            }));
+
+            _status?.Invoke($"ждём подтверждения: {info.Name}");
+
+            bool ok;
+
+            try
+            {
+                ok = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+            }
+            catch (TimeoutException)
+            {
+                _status?.Invoke($"{info.Name}: удалённая сторона не ответила");
+                return;
+            }
+
+            if (!ok)
+            {
+                _status?.Invoke($"{info.Name}: передача отклонена");
+                return;
+            }
+
+            await using var stream = File.OpenRead(path);
+            var buffer = new byte[FileWire.ChunkSize];
+            var lastReport = DateTime.UtcNow;
+            long sent = 0;
+
+            while (sent < info.Length)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(0, FileWire.ChunkSize), ct);
+
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                _peer.SendBinary(FileWire.Frame(id, buffer.AsSpan(0, read)));
+                sent += read;
+
+                if (DateTime.UtcNow - lastReport > TimeSpan.FromMilliseconds(700))
+                {
+                    _status?.Invoke($"отправка {info.Name}: {sent * 100 / info.Length}%");
+                    lastReport = DateTime.UtcNow;
+                }
+
+                // не забиваем очередь SCTP
+                while (_peer.BufferedBytes > 1_000_000)
+                {
+                    await Task.Delay(20, ct);
+                }
+            }
+
+            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(new { t = "file", op = "done", id }));
+
+            Log.Info($"файл отправлен: {info.Name} ({sent / 1024} КБ)");
+            _status?.Invoke($"файл отправлен: {info.Name}");
+        }
+        catch (OperationCanceledException)
+        {
+            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
+            _status?.Invoke("передача отменена");
+        }
+        catch (Exception ex)
+        {
+            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
+            Log.Error($"файл не отправлен: {ex.Message}");
+            _status?.Invoke("ошибка передачи: " + ex.Message);
+        }
+        finally
+        {
+            _offers.Remove(id);
+        }
+    }
+}

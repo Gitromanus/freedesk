@@ -182,6 +182,27 @@ public sealed class PromptDialog : ModernWindow
         return source.Task;
     }
 
+    /// <summary>Спросить строку (например, путь к файлу на удалённой машине).</summary>
+    public static Task<string?> AskTextAsync(Form owner, string title, string message, string value)
+    {
+        var source = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        owner.BeginInvoke(() =>
+        {
+            try
+            {
+                using var dialog = new PromptDialog(title, message, value, confirmMode: false);
+                source.SetResult(dialog.ShowDialog(owner) == DialogResult.OK ? dialog.InputValue : null);
+            }
+            catch (Exception ex)
+            {
+                source.SetException(ex);
+            }
+        });
+
+        return source.Task;
+    }
+
     /// <summary>Спросить пароль устройства. null — пользователь отказался.</summary>
     public static Task<PasswordReply?> AskPasswordAsync(Form owner, string peerName)
     {

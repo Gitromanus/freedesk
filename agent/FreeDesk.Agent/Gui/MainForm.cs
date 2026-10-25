@@ -1011,6 +1011,7 @@ public sealed class MainForm : ModernWindow
             ShowFromTray();
             OpenSettings();
         });
+        menu.Items.Add("Отправить файл зрителю…", null, (_, _) => SendFileFromTray());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Выход", null, (_, _) =>
         {
@@ -1041,6 +1042,30 @@ public sealed class MainForm : ModernWindow
         }
 
         return Icon.FromHandle(bitmap.GetHicon());
+    }
+
+    /// <summary>«Скачать» с этой машины: отдаём файл подключённому зрителю.</summary>
+    private void SendFileFromTray()
+    {
+        if (!_runtime.HasActiveViewer)
+        {
+            _tray.ShowBalloonTip(2000, "FreeDesk", "Нет подключённого зрителя", ToolTipIcon.Warning);
+            return;
+        }
+
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Отправить файл зрителю",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+
+        if (dialog.ShowDialog() != DialogResult.OK)
+        {
+            return;
+        }
+
+        _ = _runtime.SendFileToViewerAsync(dialog.FileName);
     }
 
     private void ShowFromTray()

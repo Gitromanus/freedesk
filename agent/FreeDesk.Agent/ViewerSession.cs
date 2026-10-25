@@ -21,8 +21,8 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly AgentConfig? _config;
     private string? _password;
     private (string Salt, int Iterations, byte[] Hash)? _pendingCredential;
-    private int _fileCounter;
-    private readonly Dictionary<int, TaskCompletionSource<bool>> _fileOffers = new();
+    private FileSender? _fileSender;
+    private FileReceiver? _fileReceiver;
     private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
@@ -138,6 +138,25 @@ public sealed class ViewerSession : IAsyncDisposable
         var peer = new WebRtcPeer(offerer: true, _codec);
         _peer = peer;
 
+        _fileReceiver = new FileReceiver();
+        _fileSender = new FileSender(peer, text => StatusChanged?.Invoke(text));
+
+        peer.BinaryReceived += data =>
+        {
+            if (_fileReceiver is null || !FileWire.TryUnframe(data, out var transferId, out var chunk))
+            {
+                return;
+            }
+
+            var received = _fileReceiver.Write(transferId, chunk);
+
+            if (received is not null)
+            {
+                Log.Info($"файл получен: {received.Path} ({received.Size / 1024} КБ)");
+                StatusChanged?.Invoke($"получен файл: {received.Name}");
+            }
+        };
+
         peer.LocalSignal += signal =>
             _ = _client.SignalAsync(_sessionId!, "ice", signal, CancellationToken.None);
 
@@ -204,7 +223,12 @@ public sealed class ViewerSession : IAsyncDisposable
                         break;
 
                     case "file":
-                        HandleFileControl(root);
+                        // сначала — ответ на нашу отправку, иначе — входящее предложение
+                        if (_fileSender?.HandleControl(root) != true)
+                        {
+                            HandleIncomingFile(root);
+                        }
+
                         break;
                 }
             }
@@ -283,9 +307,18 @@ public sealed class ViewerSession : IAsyncDisposable
         }
     }
 
-    /// <summary>Отправить файл на удалённую машину через data channel.</summary>
-    public async Task SendFileAsync(string path, CancellationToken ct = default)
+    /// <summary>Отправить файл на удалённую машину (кнопка в панели просмотра).</summary>
+    public Task SendFileAsync(string path, CancellationToken ct = default) =>
+        _fileSender?.SendAsync(path, ct) ?? Task.CompletedTask;
+
+    /// <summary>Попросить у хоста файл по пути и сохранить его у себя.</summary>
+    public void RequestDownload(string remotePath)
     {
+        if (string.IsNullOrWhiteSpace(remotePath))
+        {
+            return;
+        }
+
         var peer = _peer;
 
         if (peer is null || !peer.IsConnected)
@@ -294,118 +327,54 @@ public sealed class ViewerSession : IAsyncDisposable
             return;
         }
 
-        var info = new FileInfo(path);
-
-        if (!info.Exists)
-        {
-            StatusChanged?.Invoke("файл не найден");
-            return;
-        }
-
-        if (info.Length <= 0 || info.Length > FileWire.MaxFileBytes)
-        {
-            StatusChanged?.Invoke("файл слишком большой (макс. 2 ГБ)");
-            return;
-        }
-
-        var id = Interlocked.Increment(ref _fileCounter);
-        var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _fileOffers[id] = accepted;
-
-        try
-        {
-            peer.SendControl(JsonSerializer.Serialize(new
-            {
-                t = "file",
-                op = "offer",
-                id,
-                name = info.Name,
-                size = info.Length,
-            }));
-
-            StatusChanged?.Invoke($"ждём подтверждения: {info.Name}");
-
-            bool ok;
-
-            try
-            {
-                ok = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
-            }
-            catch (TimeoutException)
-            {
-                StatusChanged?.Invoke($"{info.Name}: удалённая сторона не ответила");
-                return;
-            }
-
-            if (!ok)
-            {
-                StatusChanged?.Invoke($"{info.Name}: передача отклонена");
-                return;
-            }
-
-            await using var stream = File.OpenRead(path);
-            var buffer = new byte[FileWire.ChunkSize];
-            var lastReport = DateTime.UtcNow;
-            long sent = 0;
-
-            while (sent < info.Length)
-            {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, FileWire.ChunkSize), ct);
-
-                if (read <= 0)
-                {
-                    break;
-                }
-
-                peer.SendBinary(FileWire.Frame(id, buffer.AsSpan(0, read)));
-                sent += read;
-
-                if (DateTime.UtcNow - lastReport > TimeSpan.FromMilliseconds(700))
-                {
-                    StatusChanged?.Invoke($"отправка {info.Name}: {sent * 100 / info.Length}%");
-                    lastReport = DateTime.UtcNow;
-                }
-
-                // не забиваем очередь SCTP: ждём, пока она рассосётся
-                while (peer.BufferedBytes > 1_000_000)
-                {
-                    await Task.Delay(20, ct);
-                }
-            }
-
-            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "done", id }));
-
-            Log.Info($"файл отправлен: {info.Name} ({sent / 1024} КБ)");
-            StatusChanged?.Invoke($"файл отправлен: {info.Name}");
-        }
-        catch (OperationCanceledException)
-        {
-            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
-            StatusChanged?.Invoke("передача отменена");
-        }
-        catch (Exception ex)
-        {
-            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
-            Log.Error($"файл не отправлен: {ex.Message}");
-            StatusChanged?.Invoke("ошибка передачи: " + ex.Message);
-        }
-        finally
-        {
-            _fileOffers.Remove(id);
-        }
+        StatusChanged?.Invoke($"запрашиваю файл: {Path.GetFileName(remotePath)}");
+        peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "download", path = remotePath }));
     }
 
-    private void HandleFileControl(JsonElement root)
+    /// <summary>Хост предложил файл — принимаем и пишем в Downloads\FreeDesk.</summary>
+    private void HandleIncomingFile(JsonElement root)
     {
         var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
         var id = root.TryGetProperty("id", out var idValue) && idValue.TryGetInt32(out var parsed) ? parsed : 0;
 
-        if (op is not ("accept" or "reject") || !_fileOffers.TryGetValue(id, out var pending))
+        switch (op)
         {
-            return;
-        }
+            case "offer":
+                var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "file" : "file";
+                var size = root.TryGetProperty("size", out var sizeValue) && sizeValue.TryGetInt64(out var bytes) ? bytes : 0;
 
-        pending.TrySetResult(op == "accept");
+                string? startError = null;
+                var started = _fileReceiver is not null && _fileReceiver.TryStart(id, name, size, out startError);
+
+                if (started)
+                {
+                    _peer?.SendControl(JsonSerializer.Serialize(new { t = "file", op = "accept", id }));
+                    StatusChanged?.Invoke($"получение файла: {name}");
+                }
+                else
+                {
+                    var rejectReason = startError ?? "приём недоступен";
+                    _peer?.SendControl(JsonSerializer.Serialize(new { t = "file", op = "reject", id, reason = rejectReason }));
+                    Log.Warn($"файл отклонён: {rejectReason}");
+                }
+
+                break;
+
+            case "done":
+                Log.Info($"передача файла {id} завершена");
+                break;
+
+            case "cancel":
+                _fileReceiver?.Abort(id);
+                Log.Warn($"передача файла {id} отменена");
+                break;
+
+            case "error":
+                var errorText = root.TryGetProperty("reason", out var reasonValue) ? reasonValue.GetString() : null;
+                Log.Warn($"файл не отправлен: {errorText}");
+                StatusChanged?.Invoke(errorText ?? "удалённая сторона не смогла отдать файл");
+                break;
+        }
     }
 
     /// <summary>Пришёл кадр от хоста: JPEG или H.264 access unit.</summary>
@@ -619,5 +588,8 @@ public sealed class ViewerSession : IAsyncDisposable
 
         _decoder?.Dispose();
         _decoder = null;
+
+        _fileReceiver?.Dispose();
+        _fileReceiver = null;
     }
 }

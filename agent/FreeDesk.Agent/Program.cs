@@ -58,6 +58,7 @@ var installAutostart = false;
 var removeAutostart = false;
 int? displayArg = null;
 string? sendFile = null;
+string? downloadPath = null;
 var captureTestFrames = 0;
 long captureQuality = 70;
 var captureCodec = "mjpeg";
@@ -109,6 +110,9 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--send-file" when i + 1 < args.Length:
             sendFile = args[++i];
+            break;
+        case "--download" when i + 1 < args.Length:
+            downloadPath = args[++i];
             break;
         case "--set-password" when i + 1 < args.Length:
             newPassword = args[++i];
@@ -169,6 +173,7 @@ for (var i = 0; i < args.Length; i++)
                   --input-test <id>    проверить передачу ввода без окна
                   --password <пароль>  пароль устройства для подключения без подтверждения
                   --send-file <путь>   после подключения отправить файл на удалённую машину
+                  --download <путь>    после подключения скачать файл по пути на удалённой машине
                   --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти
                   --clear-password     удалить сохранённый пароль профиля и выйти
                   --profile <имя>      отдельный профиль (несколько агентов на машине)
@@ -286,7 +291,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config, sendFile);
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config, sendFile, downloadPath);
 }
 
 if (inputTestTarget is not null)
@@ -296,10 +301,13 @@ if (inputTestTarget is not null)
 
 if (guiMode)
 {
-    return RunGui(config, client, cts, openSettings, startHidden);
+    return RunGui(config, client, cts, openSettings, startHidden, sendFile);
 }
 
-var runtime = new AgentRuntime(config, client);
+var runtime = new AgentRuntime(config, client)
+{
+    AutoSendFile = sendFile,
+};
 await runtime.RunAsync(connectTo, cts.Token);
 
 Log.Info("остановлено");
@@ -351,7 +359,7 @@ static string PickFreeProfile() => ProfilePicker.Pick();
 
 static int RunViewer(
     SignalingClient client, string targetId, VideoCodec codec, string? password, int? display,
-    AgentConfig config, string? sendFile = null)
+    AgentConfig config, string? sendFile = null, string? downloadPath = null)
 {
     var session = new ViewerSession(client, targetId, codec, password ?? string.Empty, config);
     session.PreferredDisplay = display;
@@ -359,6 +367,11 @@ static int RunViewer(
     if (sendFile is not null)
     {
         session.Connected += () => _ = session.SendFileAsync(sendFile);
+    }
+
+    if (downloadPath is not null)
+    {
+        session.Connected += () => session.RequestDownload(downloadPath);
     }
     var exitCode = 0;
 
@@ -427,9 +440,12 @@ static int RunInputTest(SignalingClient client, string targetId)
 
 static int RunGui(
     AgentConfig config, SignalingClient client, CancellationTokenSource cts,
-    bool openSettings = false, bool startHidden = false)
+    bool openSettings = false, bool startHidden = false, string? autoSendFile = null)
 {
-    var runtime = new AgentRuntime(config, client);
+    var runtime = new AgentRuntime(config, client)
+    {
+        AutoSendFile = autoSendFile,
+    };
     var exitCode = 0;
 
     var thread = new Thread(() =>
