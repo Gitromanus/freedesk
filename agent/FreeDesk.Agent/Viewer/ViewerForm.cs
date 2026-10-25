@@ -17,7 +17,11 @@ public sealed class ViewerForm : ModernWindow
     private readonly ViewerSession _session;
 
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, BackColor = Ui.Bg };
+
+    /// <summary>Одна полоса: мониторы + отключение + сворачивание (крайнее справа).</summary>
     private readonly DoubleBufferedPanel _bar = new();
+
+    /// <summary>Свёрнутое состояние: один язычок-шеврон.</summary>
     private readonly DoubleBufferedPanel _mini = new();
 
     private readonly List<CaptionButton> _displayButtons = new();
@@ -109,7 +113,6 @@ public sealed class ViewerForm : ModernWindow
     private void BuildToolbar()
     {
         _bar.BackColor = Ui.CardDeep;
-        _bar.Visible = false;
         _bar.Paint += (_, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -119,16 +122,24 @@ public sealed class ViewerForm : ModernWindow
         };
 
         _collapseBtn.TabStop = false;
-        _collapseBtn.Click += () => SetBarCollapsed(true);
+        _collapseBtn.Click += () => SetBarCollapsed(!_barCollapsed);
 
         _powerBtn.TabStop = false;
         _powerBtn.Click += RequestDisconnect;
 
-        _bar.Controls.Add(_collapseBtn);
+        // порядок: [мониторы…] [отключиться] [свернуть] — сворачивание всегда крайнее справа
         _bar.Controls.Add(_powerBtn);
+        _bar.Controls.Add(_collapseBtn);
 
         _mini.BackColor = Ui.CardDeep;
         _mini.Visible = false;
+        _mini.Paint += (_, e) =>
+        {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using var pen = new Pen(Ui.Line);
+            using var path = Ui.RoundPath(new Rectangle(0, 0, _mini.Width - 1, _mini.Height - 1), 8);
+            e.Graphics.DrawPath(pen, path);
+        };
 
         _expandBtn.TabStop = false;
         _expandBtn.Click += () => SetBarCollapsed(false);
@@ -164,12 +175,18 @@ public sealed class ViewerForm : ModernWindow
     private void SetBarCollapsed(bool collapsed)
     {
         _barCollapsed = collapsed;
+
+        // Свёрнуто — прячем всю полосу, остаётся только шеврон разворота.
         _bar.Visible = !collapsed;
         _mini.Visible = collapsed;
+
         LayoutOverlays();
     }
 
-    /// <summary>Плавающие элементы поверх картинки: панель, «язычок», всплывающий статус.</summary>
+    /// <summary>Отступ плавающей полосы от верхнего края: не липнет к заголовку.</summary>
+    private const int BarTop = 40;
+
+    /// <summary>Плавающая полоса поверх картинки: мониторы, отключение, сворачивание.</summary>
     private void LayoutOverlays()
     {
         var x = 6;
@@ -185,31 +202,25 @@ public sealed class ViewerForm : ModernWindow
             x += 4;
         }
 
-        _collapseBtn.Location = new Point(x, 5);
-        x += _collapseBtn.Width + 2;
-
         _powerBtn.Location = new Point(x, 5);
-        x += _powerBtn.Width + 6;
+        x += _powerBtn.Width + 2;
+
+        _collapseBtn.Location = new Point(x, 5);
+        x += _collapseBtn.Width + 6;
 
         _bar.Size = new Size(x, 34);
-        _bar.Location = new Point(Math.Max(0, (ClientSize.Width - _bar.Width) / 2), 8);
+        _bar.Location = new Point(Math.Max(0, (ClientSize.Width - _bar.Width) / 2), BarTop);
 
-        if (_bar.Width > 0)
-        {
-            _bar.Region?.Dispose();
-            _bar.Region = new Region(Ui.RoundPath(new Rectangle(0, 0, _bar.Width, _bar.Height), 10));
-        }
+        _bar.Region?.Dispose();
+        _bar.Region = new Region(Ui.RoundPath(new Rectangle(0, 0, _bar.Width, _bar.Height), 10));
 
+        // Язычок свёрнутого состояния — там же, где была полоса.
         _mini.Size = new Size(32, 24);
-        _mini.Location = new Point(Math.Max(0, (ClientSize.Width - _mini.Width) / 2), 6);
-
-        if (_mini.Width > 0)
-        {
-            _mini.Region?.Dispose();
-            _mini.Region = new Region(Ui.RoundPath(new Rectangle(0, 0, _mini.Width, _mini.Height), 8));
-        }
-
+        _mini.Location = new Point(Math.Max(0, (ClientSize.Width - _mini.Width) / 2), BarTop);
         _expandBtn.Location = new Point(2, 1);
+
+        _mini.Region?.Dispose();
+        _mini.Region = new Region(Ui.RoundPath(new Rectangle(0, 0, _mini.Width, _mini.Height), 8));
 
         _toast.Location = new Point(12, Math.Max(12, ClientSize.Height - 34));
         _toast.Size = new Size(Math.Min(560, Math.Max(200, ClientSize.Width - 24)), 24);
@@ -219,11 +230,9 @@ public sealed class ViewerForm : ModernWindow
     {
         base.OnShown(e);
 
-        // Панель показываем сразу: даже до кадров на ней есть «отключиться».
-        if (!_barCollapsed)
-        {
-            _bar.Visible = true;
-        }
+        // Полоса видна всегда: на ней есть «отключиться» и «свернуть».
+        _bar.Visible = !_barCollapsed;
+        _mini.Visible = _barCollapsed;
 
         LayoutOverlays();
         _session.Start();
@@ -309,10 +318,8 @@ public sealed class ViewerForm : ModernWindow
             }
         }
 
-        if (!_barCollapsed)
-        {
-            _bar.Visible = true;
-        }
+        _bar.Visible = !_barCollapsed;
+        _mini.Visible = _barCollapsed;
 
         LayoutOverlays();
     }
