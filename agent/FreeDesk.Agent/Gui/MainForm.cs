@@ -51,16 +51,21 @@ public sealed class MainForm : ModernWindow
     private Color _statusColor = Ui.Amber;
     private int _statusDotY;
     private readonly ToolTip _sidebarTip = new();
+    private readonly NotifyIcon _tray = new();
+    private readonly bool _startHidden;
+    private bool _shownOnce;
+    private bool _exitRequested;
 
     public MainForm(
         AgentConfig config, SignalingClient client, AgentRuntime runtime, CancellationTokenSource cts,
-        bool openSettingsAtStart = false)
+        bool openSettingsAtStart = false, bool startHidden = false)
     {
         _config = config;
         _client = client;
         _runtime = runtime;
         _cts = cts;
         _openSettingsAtStart = openSettingsAtStart;
+        _startHidden = startHidden;
 
         _recentPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -567,7 +572,14 @@ public sealed class MainForm : ModernWindow
 
         Load += (_, _) =>
         {
+            BuildTray();
             _ = StartAsync();
+
+            if (_startHidden)
+            {
+                // Автозапуск: окно не показываем, живём в трее
+                ShowInTaskbar = false;
+            }
 
             // --settings: открыть настройки сразу (удобно для первичной настройки машины)
             if (_openSettingsAtStart)
@@ -973,6 +985,124 @@ public sealed class MainForm : ModernWindow
 
     private static string FormatId(string id) =>
         id.Length == 9 ? $"{id[..3]} {id[3..6]} {id[6..]}" : id;
+
+    // ─────────── трей ───────────
+
+    private void BuildTray()
+    {
+        _tray.Icon = CreateTrayIcon();
+        _tray.Text = _config.PublicId is { Length: 9 } publicId
+            ? $"FreeDesk · {FormatId(publicId)}"
+            : "FreeDesk";
+        _tray.Visible = true;
+        _tray.DoubleClick += (_, _) => ShowFromTray();
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Открыть FreeDesk", null, (_, _) => ShowFromTray());
+        menu.Items.Add("Скопировать мой ID", null, (_, _) =>
+        {
+            if (_config.PublicId is { Length: 9 } id)
+            {
+                Clipboard.SetText(FormatId(id));
+            }
+        });
+        menu.Items.Add("Настройки", null, (_, _) =>
+        {
+            ShowFromTray();
+            OpenSettings();
+        });
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Выход", null, (_, _) =>
+        {
+            _exitRequested = true;
+            Close();
+        });
+
+        _tray.ContextMenuStrip = menu;
+    }
+
+    private static Icon CreateTrayIcon()
+    {
+        using var bitmap = new Bitmap(32, 32);
+
+        using (var g = Graphics.FromImage(bitmap))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.Transparent);
+
+            using var path = Ui.RoundPath(new Rectangle(2, 2, 28, 28), 8);
+            using var brush = new SolidBrush(Ui.Accent);
+            g.FillPath(brush, path);
+
+            using var font = new Font("Segoe UI", 11f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var text = new SolidBrush(Color.White);
+            var size = g.MeasureString("FD", font);
+            g.DrawString("FD", font, text, (32 - size.Width) / 2f, (32 - size.Height) / 2f);
+        }
+
+        return Icon.FromHandle(bitmap.GetHicon());
+    }
+
+    private void ShowFromTray()
+    {
+        ShowInTaskbar = true;
+        Show();
+
+        if (WindowState == FormWindowState.Minimized)
+        {
+            WindowState = FormWindowState.Normal;
+        }
+
+        Activate();
+        BringToFront();
+    }
+
+    /// <summary>
+    /// Запуск с --tray: окно не должно мелькнуть при старте.
+    /// Обычный Hide() в Load не помогает — форма всё равно показывается после.
+    /// </summary>
+    protected override void SetVisibleCore(bool value)
+    {
+        if (_startHidden && !_shownOnce)
+        {
+            _shownOnce = true;
+            base.SetVisibleCore(false);
+            return;
+        }
+
+        if (value)
+        {
+            _shownOnce = true;
+        }
+
+        base.SetVisibleCore(value);
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        // Закрытие окна не должно убивать агента: он живёт в трее и остаётся на связи.
+        // CloseReason.None приходит при WM_CLOSE извне — тоже считаем закрытием пользователем.
+        var userClose = e.CloseReason is CloseReason.UserClosing or CloseReason.None;
+
+        if (!_exitRequested && _config.MinimizeToTray && userClose)
+        {
+            Log.Info("окно свёрнуто в трей");
+            e.Cancel = true;
+            Hide();
+            ShowInTaskbar = false;
+            _tray.ShowBalloonTip(2000, "FreeDesk", "Агент свёрнут в трей и продолжает работать", ToolTipIcon.Info);
+            return;
+        }
+
+        base.OnFormClosing(e);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        _tray.Visible = false;
+        _tray.Dispose();
+        base.OnFormClosed(e);
+    }
 
     private sealed class RecentEntry
     {

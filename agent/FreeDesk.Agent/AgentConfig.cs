@@ -35,6 +35,9 @@ public sealed class AgentConfig
     /// <summary>Монитор, с которого начинается трансляция (0 — основной).</summary>
     public int Display { get; set; }
 
+    /// <summary>Закрытие окна сворачивает агент в трей, а не завершает его.</summary>
+    public bool MinimizeToTray { get; set; } = true;
+
     /// <summary>
     /// Сохранённые пароли устройств: по ID устройства лежит соль/итерации/хеш PBKDF2.
     /// Сам пароль не хранится — только то, из чего нельзя восстановить пароль.

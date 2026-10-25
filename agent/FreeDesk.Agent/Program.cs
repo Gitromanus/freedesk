@@ -53,6 +53,9 @@ string? newPassword = null;
 bool clearPassword = false;
 bool guiMode = guiRequested;
 var openSettings = false;
+var startHidden = false;
+var installAutostart = false;
+var removeAutostart = false;
 int? displayArg = null;
 var captureTestFrames = 0;
 long captureQuality = 70;
@@ -86,6 +89,16 @@ for (var i = 0; i < args.Length; i++)
         case "--settings":
             guiMode = true;
             openSettings = true;
+            break;
+        case "--tray":
+            guiMode = true;
+            startHidden = true;
+            break;
+        case "--install-autostart":
+            installAutostart = true;
+            break;
+        case "--remove-autostart":
+            removeAutostart = true;
             break;
         case "--input-test" when i + 1 < args.Length:
             inputTestTarget = args[++i];
@@ -163,6 +176,9 @@ for (var i = 0; i < args.Length; i++)
                   --capture-test [N]   снять N кадров, закодировать и сохранить в %TEMP%
                   --codec <кодек>      видео: h264 (openh264) | mjpeg
                   --quality <10..100>  качество JPEG (по умолчанию 70)
+                  --tray               запустить скрыто, только иконка в трее
+                  --install-autostart  прописать автозапуск при входе в Windows
+                  --remove-autostart   убрать автозапуск
                 """);
             return 0;
         default:
@@ -192,6 +208,22 @@ if (newPassword is not null || clearPassword)
         ? $"пароль устройства удалён (профиль {AgentConfig.Profile})"
         : $"пароль устройства сохранён (профиль {AgentConfig.Profile})");
     return 0;
+}
+
+if (installAutostart || removeAutostart)
+{
+    if (removeAutostart)
+    {
+        Autostart.Disable();
+        Console.WriteLine("автозапуск выключен");
+        return 0;
+    }
+
+    var ok = Autostart.Enable(AgentConfig.Profile);
+    Console.WriteLine(ok
+        ? $"автозапуск включён (профиль {AgentConfig.Profile})"
+        : "не удалось прописать автозапуск");
+    return ok ? 0 : 1;
 }
 
 if (captureTestFrames > 0)
@@ -259,7 +291,7 @@ if (inputTestTarget is not null)
 
 if (guiMode)
 {
-    return RunGui(config, client, cts, openSettings);
+    return RunGui(config, client, cts, openSettings, startHidden);
 }
 
 var runtime = new AgentRuntime(config, client);
@@ -382,7 +414,9 @@ static int RunInputTest(SignalingClient client, string targetId)
     return 0;
 }
 
-static int RunGui(AgentConfig config, SignalingClient client, CancellationTokenSource cts, bool openSettings = false)
+static int RunGui(
+    AgentConfig config, SignalingClient client, CancellationTokenSource cts,
+    bool openSettings = false, bool startHidden = false)
 {
     var runtime = new AgentRuntime(config, client);
     var exitCode = 0;
@@ -393,7 +427,7 @@ static int RunGui(AgentConfig config, SignalingClient client, CancellationTokenS
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using var form = new MainForm(config, client, runtime, cts, openSettings);
+            using var form = new MainForm(config, client, runtime, cts, openSettings, startHidden);
             Application.Run(form);
         }
         catch (Exception ex)

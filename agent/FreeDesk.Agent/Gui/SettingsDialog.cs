@@ -19,6 +19,8 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiInput _widthInput = new("1920");
     private readonly UiInput _passwordInput = new("не задан");
     private readonly UiButton _clearPasswordBtn = new("Сбросить пароль") { Ghost = true, Radius = 10 };
+    private readonly UiToggle _trayToggle = new("Сворачивать в трей\nпри закрытии окна");
+    private readonly UiToggle _autostartToggle = new("Запускать при входе\nв Windows");
     private readonly UiButton _codecBtn = new("H.264 (openh264)") { Ghost = true, Radius = 10 };
     private readonly UiButton _captureBtn = new("Авто (DXGI → GDI)") { Ghost = true, Radius = 10 };
 
@@ -54,7 +56,7 @@ public sealed class SettingsDialog : ModernWindow
         // На ноутбуках 800 px по высоте не влезают: ограничиваем по рабочему столу,
         // а содержимое делаем прокручиваемым.
         var workingArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1024, 768);
-        Height = Math.Min(800, Math.Max(480, workingArea.Height - 60));
+        Height = Math.Min(900, Math.Max(480, workingArea.Height - 60));
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         BackColor = Ui.Card;
@@ -153,6 +155,20 @@ public sealed class SettingsDialog : ModernWindow
             _captureBtn.Text = CaptureLabels[_captureIndex];
         };
         _captureBtn.Text = CaptureLabels[_captureIndex];
+
+        // Поведение агента: трей и автозапуск — рядом, чтобы не тянуть диалог вниз.
+        var half = (w - 12) / 2;
+
+        _trayToggle.Checked = config.MinimizeToTray;
+        _trayToggle.Location = new Point(x, y + 4);
+        _trayToggle.Size = new Size(half, 40);
+
+        _autostartToggle.Checked = Autostart.IsEnabled;
+        _autostartToggle.Location = new Point(x + half + 12, y + 4);
+        _autostartToggle.Size = new Size(half, 40);
+
+        _content.Controls.AddRange(new Control[] { _trayToggle, _autostartToggle });
+        y += 40 + 10;
 
         var save = new UiButton("Сохранить")
         {
@@ -269,6 +285,20 @@ public sealed class SettingsDialog : ModernWindow
         else if (newPassword.Length > 0)
         {
             _config.SetUnattendedPassword(newPassword);
+        }
+
+        _config.MinimizeToTray = _trayToggle.Checked;
+
+        if (_autostartToggle.Checked != Autostart.IsEnabled)
+        {
+            if (_autostartToggle.Checked)
+            {
+                Autostart.Enable(AgentConfig.Profile);
+            }
+            else
+            {
+                Autostart.Disable();
+            }
         }
         _config.Capture = CaptureModes[_captureIndex];
         _config.Save();
