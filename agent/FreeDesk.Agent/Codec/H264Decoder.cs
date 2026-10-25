@@ -28,11 +28,16 @@ public sealed unsafe class H264Decoder : IDisposable
     private bool _disposed;
 
     /// <summary>
-    /// Проверяет, что openh264.dll доступна: без неё H.264 невозможен,
-    /// и лучше заранее откатиться на MJPEG.
+    /// Проверяет, что кодек доступен: встроенный ресурс или openh264.dll рядом с exe.
+    /// Без него H.264 невозможен, и лучше заранее откатиться на MJPEG.
     /// </summary>
     public static bool IsAvailable()
     {
+        if (NativeCodec.Ensure() is not null)
+        {
+            return true;
+        }
+
         try
         {
             NativeLibrary.Load(Dll);

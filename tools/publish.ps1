@@ -33,13 +33,6 @@ try {
     dotnet publish $project @common -o (Join-Path $temp 'console')
     if ($LASTEXITCODE -ne 0) { throw 'console publish failed' }
     Copy-Item (Join-Path $temp 'console\freedesk-agent.exe') $output -Force
-
-    # openh264.dll лежит рядом с exe, а не внутри бандла
-    foreach ($dir in @('gui', 'console')) {
-        $dll = Join-Path $temp "$dir\openh264.dll"
-        if (Test-Path $dll) { Copy-Item $dll $output -Force }
-        else { Write-Warning "openh264.dll не попал в publish ($dir)" }
-    }
 }
 finally {
     Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue

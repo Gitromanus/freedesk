@@ -324,9 +324,32 @@ public abstract class ModernWindow : Form
             Math.Max(0, area.Width - 2), Math.Max(0, area.Height - 2));
     }
 
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+
+            // Без WS_THICKFRAME система игнорирует HTLEFT/HTRIGHT из WM_NCHITTEST —
+            // окно нельзя растянуть мышью. Рамку убираем через WM_NCCALCSIZE.
+            cp.Style |= 0x00040000; // WS_THICKFRAME
+            cp.Style |= 0x00020000; // WS_MINIMIZEBOX
+            cp.Style |= 0x00010000; // WS_MAXIMIZEBOX
+            return cp;
+        }
+    }
+
     protected override void WndProc(ref Message m)
     {
         const int WM_NCHITTEST = 0x84;
+        const int WM_NCCALCSIZE = 0x83;
+
+        if (m.Msg == WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
+        {
+            // Клиентская область = всё окно: заголовок и рамку рисуем сами.
+            m.Result = IntPtr.Zero;
+            return;
+        }
 
         if (m.Msg == WM_NCHITTEST)
         {

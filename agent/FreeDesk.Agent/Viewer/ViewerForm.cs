@@ -382,6 +382,8 @@ public sealed class ViewerForm : ModernWindow
         var menu = new ContextMenuStrip();
         menu.Items.Add("Отправить файл…", null, (_, _) => PickAndSendFile());
         menu.Items.Add("Скачать файл…", null, (_, _) => PickAndDownloadFile());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Открыть папку приёма", null, (_, _) => OpenDownloads());
         menu.Show(_bar, new Point(_fileBtn.Left, _bar.Height + 4));
     }
 
@@ -404,20 +406,33 @@ public sealed class ViewerForm : ModernWindow
         _canvas.Focus();
     }
 
-    private async void PickAndDownloadFile()
+    /// <summary>Папка, куда падают принятые файлы — открываем проводник.</summary>
+    private static void OpenDownloads()
     {
-        var path = await PromptDialog.AskTextAsync(
-            this,
-            "Скачать файл",
-            "Путь к файлу на удалённой машине",
-            @"C:\Users\Public\Documents");
-
-        if (string.IsNullOrWhiteSpace(path))
+        try
         {
-            return;
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = Files.FileWire.Downloads,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"не удалось открыть папку: {ex.Message}");
+        }
+    }
+
+    /// <summary>Выбор файла на удалённой машине — список каталогов, без ручного ввода пути.</summary>
+    private void PickAndDownloadFile()
+    {
+        using var dialog = new RemoteFileDialog(_session, Files.FileWire.Downloads);
+
+        if (dialog.ShowDialog(this) == DialogResult.OK && dialog.SelectedPath is { Length: > 0 } path)
+        {
+            _session.RequestDownload(path);
         }
 
-        _session.RequestDownload(path.Trim());
         _canvas.Focus();
     }
 

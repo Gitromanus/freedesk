@@ -586,6 +586,65 @@ public sealed class AgentRuntime
         session.Injector.Handle(json);
     }
 
+    /// <summary>Листинг каталога для выбора файла на удалённой машине.</summary>
+    private static object BuildListing(string? requested)
+    {
+        var path = string.IsNullOrWhiteSpace(requested) ? FileWire.Downloads : requested;
+
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                var entries = new List<object>();
+
+                foreach (var dir in Directory.EnumerateDirectories(path).Take(200))
+                {
+                    var info = new DirectoryInfo(dir);
+
+                    if ((info.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0)
+                    {
+                        continue;
+                    }
+
+                    entries.Add(new { n = info.Name, d = true });
+                }
+
+                foreach (var file in Directory.EnumerateFiles(path).Take(300))
+                {
+                    var info = new FileInfo(file);
+
+                    if ((info.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0)
+                    {
+                        continue;
+                    }
+
+                    entries.Add(new { n = info.Name, d = false });
+                }
+
+                return new
+                {
+                    t = "file",
+                    op = "list",
+                    path,
+                    parent = Directory.GetParent(path)?.FullName,
+                    entries,
+                };
+            }
+
+            // Не каталог — показываем его папку: зритель выберет файл из списка
+            if (File.Exists(path) && Path.GetDirectoryName(path) is { Length: > 0 } directory)
+            {
+                return BuildListing(directory);
+            }
+        }
+        catch (Exception ex)
+        {
+            return new { t = "file", op = "list", error = ex.Message };
+        }
+
+        return new { t = "file", op = "list", path, error = "каталог недоступен" };
+    }
+
     /// <summary>Есть ли подключённый зритель (наш экран сейчас смотрят).</summary>
     public bool HasActiveViewer =>
         _sessions.Values.Any(s => s.Streamer is not null && s.Transport is { IsConnected: true });
@@ -654,6 +713,12 @@ public sealed class AgentRuntime
 
                 Log.Info($"зритель скачивает: {remotePath}");
                 _ = Task.Run(() => session.Sender?.SendAsync(remotePath));
+                break;
+
+            case "browse":
+                // зритель листает файловую систему этой машины
+                var browsePath = root.TryGetProperty("path", out var browseValue) ? browseValue.GetString() : null;
+                session.Transport?.SendControl(JsonSerializer.Serialize(BuildListing(browsePath)));
                 break;
 
             case "cancel":

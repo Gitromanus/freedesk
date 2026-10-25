@@ -8,6 +8,15 @@ namespace FreeDesk.Agent;
 /// <summary>Монитор на стороне хоста (для кнопок переключения).</summary>
 public sealed record RemoteDisplay(int Index, int Width, int Height, bool Primary);
 
+/// <summary>Элемент удалённого каталога (для выбора файла к скачиванию).</summary>
+public sealed record RemoteEntry(string Name, bool IsDirectory)
+{
+    public override string ToString() => (IsDirectory ? "[ ] " : "    ") + Name;
+}
+
+/// <summary>Ответ хоста на листинг каталога.</summary>
+public sealed record RemoteListing(string Path, string? Parent, IReadOnlyList<RemoteEntry> Entries, string? Error);
+
 /// <summary>Ответ на запрос пароля: сам пароль и просьба запомнить его для этого устройства.</summary>
 public sealed record PasswordReply(string Password, bool Remember);
 
@@ -25,6 +34,7 @@ public sealed class ViewerSession : IAsyncDisposable
     private bool _noFramesWarned;
     private FileSender? _fileSender;
     private FileReceiver? _fileReceiver;
+    private TaskCompletionSource<RemoteListing?>? _browse;
     private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
@@ -315,6 +325,69 @@ public sealed class ViewerSession : IAsyncDisposable
     public Task SendFileAsync(string path, CancellationToken ct = default) =>
         _fileSender?.SendAsync(path, ct) ?? Task.CompletedTask;
 
+    /// <summary>Список каталога на хосте — для диалога выбора файла.</summary>
+    public async Task<RemoteListing?> BrowseAsync(string? path, CancellationToken ct = default)
+    {
+        var peer = _peer;
+
+        if (peer is null || !peer.IsConnected)
+        {
+            return null;
+        }
+
+        var tcs = new TaskCompletionSource<RemoteListing?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _browse = tcs;
+
+        peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "browse", path }));
+
+        try
+        {
+            return await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15), ct);
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+        finally
+        {
+            if (ReferenceEquals(_browse, tcs))
+            {
+                _browse = null;
+            }
+        }
+    }
+
+    private void HandleListing(JsonElement root)
+    {
+        var path = root.TryGetProperty("path", out var pathValue) ? pathValue.GetString() ?? "" : "";
+        var parent = root.TryGetProperty("parent", out var parentValue) && parentValue.ValueKind == JsonValueKind.String
+            ? parentValue.GetString()
+            : null;
+        var error = root.TryGetProperty("error", out var errorValue) && errorValue.ValueKind == JsonValueKind.String
+            ? errorValue.GetString()
+            : null;
+
+        var entries = new List<RemoteEntry>();
+
+        if (root.TryGetProperty("entries", out var array) && array.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in array.EnumerateArray())
+            {
+                var name = item.TryGetProperty("n", out var nameValue) ? nameValue.GetString() : null;
+
+                if (string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                var isDirectory = item.TryGetProperty("d", out var dirValue) && dirValue.ValueKind == JsonValueKind.True;
+                entries.Add(new RemoteEntry(name, isDirectory));
+            }
+        }
+
+        _browse?.TrySetResult(new RemoteListing(path, parent, entries, error));
+    }
+
     /// <summary>Попросить у хоста файл по пути и сохранить его у себя.</summary>
     public void RequestDownload(string remotePath)
     {
@@ -366,6 +439,10 @@ public sealed class ViewerSession : IAsyncDisposable
 
             case "done":
                 Log.Info($"передача файла {id} завершена");
+                break;
+
+            case "list":
+                HandleListing(root);
                 break;
 
             case "cancel":
