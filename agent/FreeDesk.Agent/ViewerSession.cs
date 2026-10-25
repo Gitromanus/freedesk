@@ -370,7 +370,10 @@ public sealed class ViewerSession : IAsyncDisposable
 
         if (string.IsNullOrEmpty(_password))
         {
-            Log.Warn("пароль устройства не введён — отклоняю заявку");
+            Log.Warn(PasswordPrompt is null
+                ? "пароль устройства не введён — в этом режиме его негде спросить (нужен --password)"
+                : "пароль устройства не введён — диалог закрыт без ввода");
+
             StatusChanged?.Invoke("нет пароля устройства");
             await RejectAsync(ct);
             return;
@@ -398,12 +401,13 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             if (_sessionId is not null)
             {
-                await _client.AnswerAsync(_sessionId, "reject", ct);
+                // Инициатор не может reject (это право принимающей стороны) — он закрывает заявку через end.
+                await _client.AnswerAsync(_sessionId, "end", ct);
             }
         }
         catch (Exception ex) when (ex is ApiException or HttpRequestException)
         {
-            Log.Warn($"заявка не отклонена: {ex.Message}");
+            Log.Warn($"заявка не закрыта: {ex.Message}");
         }
 
         Ended?.Invoke();

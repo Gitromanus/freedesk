@@ -644,13 +644,20 @@ public sealed class MainForm : ModernWindow
             Disconnect(keepStatus: true);
 
             _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec));
+
+            // Пароль спрашиваем у главного окна: встроенное окно просмотра ещё не создано
+            // и не может быть владельцем модального диалога.
+            _session.PasswordPrompt = () =>
+                PromptDialog.AskPasswordAsync(this, $"Устройство {FormatId(target)}");
+
             var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             _session.Connected += () => connected.TrySetResult(true);
             _session.StatusChanged += text => SetStatus(text, Ui.Amber);
             _session.Ended += OnUiSessionEnded;
             _session.Start();
 
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            // 90 с: хост даёт 60 с на ввод пароля, плюс запас на сам ввод
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
             using (timeout.Token.Register(() => connected.TrySetResult(false)))
             {
                 if (!await connected.Task)

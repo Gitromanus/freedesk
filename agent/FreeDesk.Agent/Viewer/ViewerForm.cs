@@ -35,7 +35,13 @@ public sealed class ViewerForm : ModernWindow
     public ViewerForm(ViewerSession session, bool standalone = true)
     {
         _session = session;
-        _session.PasswordPrompt ??= () => PromptDialog.AskPasswordAsync(this, "Удалённое устройство");
+
+        // Встроенное в MainForm окно не является top-level — диалог пароля там не покажется,
+        // им занимается сам MainForm.
+        if (standalone)
+        {
+            _session.PasswordPrompt ??= () => PromptDialog.AskPasswordAsync(this, "Удалённое устройство");
+        }
 
         Text = "FreeDesk — просмотр";
         Width = 1280;

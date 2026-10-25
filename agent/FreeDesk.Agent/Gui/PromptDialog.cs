@@ -80,8 +80,35 @@ public sealed class PromptDialog : ModernWindow
             Close();
         };
 
-        AcceptButton = null;
         Controls.AddRange(new Control[] { messageLabel, _input, accept, cancel });
+
+        // Enter подтверждает только ввод текста: принятие входящего подключения —
+        // осознанный клик, случайный Enter не должен открывать доступ.
+        KeyPreview = true;
+        KeyDown += (_, e) =>
+        {
+            if (!confirmMode && e.KeyCode == Keys.Enter)
+            {
+                _result = DialogResult.OK;
+                Close();
+                e.SuppressKeyPress = true;
+            }
+        };
+
+        // Без явного фокуса ввод «в никуда»: набираешь пароль, а поле пустое.
+        Shown += (_, _) =>
+        {
+            Activate();
+
+            if (confirmMode)
+            {
+                accept.Focus();
+            }
+            else
+            {
+                _input.Box.Focus();
+            }
+        };
 
         if (!confirmMode)
         {
@@ -128,6 +155,9 @@ public sealed class PromptDialog : ModernWindow
                     $"{peerName} ({FormatId(peerId)}) запрашивает доступ к этому компьютеру.",
                     "", confirmMode: true);
 
+                // Запрос должен быть виден, даже если приложение свёрнуто или не в фокусе
+                dialog.TopMost = true;
+
                 source.SetResult(dialog.ShowDialog(owner) == DialogResult.OK);
             }
             catch (Exception ex)
@@ -152,6 +182,9 @@ public sealed class PromptDialog : ModernWindow
                     "Пароль устройства",
                     $"{peerName} требует пароль для подключения без подтверждения.",
                     "", confirmMode: false, secretMode: true);
+
+                // Главное окно могло быть свёрнуто или за другим окном — диалог поднимаем поверх
+                dialog.TopMost = true;
 
                 source.SetResult(dialog.ShowDialog(owner) == DialogResult.OK ? dialog.InputValue : null);
             }
