@@ -1,0 +1,69 @@
+param(
+    [int]$Seconds = 25,
+    [string]$HostArgs = '',
+    [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
+)
+
+$ErrorActionPreference = 'Stop'
+
+function Read-Log([string]$path) {
+    if (-not (Test-Path $path)) { return '' }
+    try {
+        $fs = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+        $reader = New-Object IO.StreamReader($fs, [Text.Encoding]::UTF8)
+        try { return $reader.ReadToEnd() } finally { $reader.Dispose(); $fs.Dispose() }
+    } catch {
+        return ''
+    }
+}
+
+if (-not (Test-Path $AgentExe)) { throw "agent not built: $AgentExe" }
+
+$hostLog = Join-Path $env:TEMP 'fd-host.log'
+$viewLog = Join-Path $env:TEMP 'fd-viewer.log'
+Remove-Item $hostLog, $viewLog, "$hostLog.err", "$viewLog.err" -ErrorAction SilentlyContinue
+
+Write-Host 'starting host agent ...'
+$hostArgList = @('--profile', 'host', '--name', 'host-pc', '--auto-accept')
+if ($HostArgs) { $hostArgList += $HostArgs.Split(' ') }
+$hostAgent = Start-Process -FilePath $AgentExe `
+    -ArgumentList $hostArgList `
+    -RedirectStandardOutput $hostLog -RedirectStandardError "$hostLog.err" `
+    -PassThru -NoNewWindow
+
+try {
+    $hostId = $null
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 500
+        if ((Read-Log $hostLog) -match 'ID:\s+(\d{3})\s+(\d{3})\s+(\d{3})') {
+            $hostId = $Matches[1] + $Matches[2] + $Matches[3]
+            break
+        }
+        if ($hostAgent.HasExited) { throw "host exited: $(Read-Log "$hostLog.err")" }
+    }
+
+    if (-not $hostId) { throw "host did not report ID: $(Read-Log $hostLog)" }
+    Write-Host ("  host id: {0}" -f $hostId)
+
+    Write-Host 'starting viewer ...'
+    $viewer = Start-Process -FilePath $AgentExe `
+        -ArgumentList '--profile', 'viewer', '--name', 'viewer-pc', '--view', $hostId `
+        -RedirectStandardOutput $viewLog -RedirectStandardError "$viewLog.err" `
+        -PassThru -NoNewWindow
+
+    Write-Host ("  watching for {0}s ..." -f $Seconds)
+    Start-Sleep -Seconds $Seconds
+
+    if (-not $viewer.HasExited) { Stop-Process -Id $viewer.Id -Force }
+}
+finally {
+    if (-not $hostAgent.HasExited) { Stop-Process -Id $hostAgent.Id -Force }
+}
+
+Write-Host ''
+Write-Host '--- host log ---'
+Read-Log $hostLog
+Write-Host '--- viewer log ---'
+Read-Log $viewLog
+Write-Host '--- viewer stderr ---'
+Read-Log "$viewLog.err"

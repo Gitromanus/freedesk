@@ -1,0 +1,697 @@
+using System.Drawing.Drawing2D;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+namespace FreeDesk.Agent.Gui;
+
+/// <summary>Палитра и общие элементы интерфейса (тёмная тема в стиле сайта).</summary>
+public static class Ui
+{
+    public static readonly Color Bg = Color.FromArgb(0x0F, 0x17, 0x2A);
+    public static readonly Color Card = Color.FromArgb(0x1E, 0x29, 0x3B);
+    public static readonly Color CardDeep = Color.FromArgb(0x16, 0x20, 0x36);
+    public static readonly Color Field = Color.FromArgb(0x0B, 0x12, 0x20);
+    public static readonly Color Line = Color.FromArgb(0x2A, 0x38, 0x50);
+    public static readonly Color Accent = Color.FromArgb(0x63, 0x66, 0xF1);
+    public static readonly Color AccentHover = Color.FromArgb(0x81, 0x8C, 0xF8);
+    public static readonly Color Ink = Color.FromArgb(0xF1, 0xF5, 0xF9);
+    public static readonly Color Muted = Color.FromArgb(0x94, 0xA3, 0xB8);
+    public static readonly Color Green = Color.FromArgb(0x22, 0xC5, 0x5E);
+    public static readonly Color Amber = Color.FromArgb(0xF5, 0x9E, 0x0B);
+    public static readonly Color Red = Color.FromArgb(0xEF, 0x44, 0x44);
+    public static readonly Color CloseRed = Color.FromArgb(0xE8, 0x11, 0x23);
+    public static readonly Color HoverOverlay = Color.FromArgb(0x18, 0xFF, 0xFF, 0xFF);
+
+    private static bool? _hasMdl2;
+
+    /// <summary>Есть ли системный шрифт иконок (Win10+) — иначе текстовые глифы.</summary>
+    public static bool HasMdl2
+    {
+        get
+        {
+            if (_hasMdl2 is null)
+            {
+                try
+                {
+                    using var family = new FontFamily("Segoe MDL2 Assets");
+                    _hasMdl2 = family.IsStyleAvailable(FontStyle.Regular);
+                }
+                catch
+                {
+                    _hasMdl2 = false;
+                }
+            }
+
+            return _hasMdl2.Value;
+        }
+    }
+
+    public static GraphicsPath RoundPath(Rectangle bounds, int radius)
+    {
+        var path = new GraphicsPath();
+        var d = radius * 2;
+
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            path.AddRectangle(bounds);
+            return path;
+        }
+
+        if (d > bounds.Width) d = bounds.Width;
+        if (d > bounds.Height) d = bounds.Height;
+
+        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+
+        return path;
+    }
+
+    /// <summary>Включает двойную буферизацию у любого контрола (панели, списки).</summary>
+    public static void EnableDoubleBuffer(Control control)
+    {
+        typeof(Control)
+            .GetProperty("DoubleBuffered", BindingFlags.NonPublic | BindingFlags.Instance)
+            ?.SetValue(control, true);
+    }
+
+    /// <summary>Кнопка-глиф для панели заголовка: свернуть/развернуть/закрыть.</summary>
+    public static string Glyph(CaptionGlyph glyph)
+    {
+        if (HasMdl2)
+        {
+            return glyph switch
+            {
+                CaptionGlyph.Minimize => "\uE921",
+                CaptionGlyph.Maximize => "\uE922",
+                CaptionGlyph.Restore => "\uE923",
+                CaptionGlyph.Close => "\uE8BB",
+                CaptionGlyph.ChevronLeft => "\uE76B",
+                CaptionGlyph.ChevronRight => "\uE76C",
+                CaptionGlyph.Edit => "\uE70F",
+                CaptionGlyph.Delete => "\uE74D",
+                _ => "?",
+            };
+        }
+
+        return glyph switch
+        {
+            CaptionGlyph.Minimize => "\u2014",
+            CaptionGlyph.Maximize => "\u25A2",
+            CaptionGlyph.Restore => "\u2750",
+            CaptionGlyph.Close => "\u2715",
+            CaptionGlyph.ChevronLeft => "\u2039",
+            CaptionGlyph.ChevronRight => "\u203A",
+            CaptionGlyph.Edit => "\u270E",
+            CaptionGlyph.Delete => "\u2715",
+            _ => "?",
+        };
+    }
+
+    public static Font GlyphFont(float size) =>
+        new(HasMdl2 ? "Segoe MDL2 Assets" : "Segoe UI", size);
+}
+
+public enum CaptionGlyph
+{
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+    ChevronLeft,
+    ChevronRight,
+    Edit,
+    Delete,
+}
+
+/// <summary>Панель с двойной буферизацией: без мерцания при перерисовке.</summary>
+public class DoubleBufferedPanel : Panel
+{
+    public DoubleBufferedPanel()
+    {
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+    }
+}
+
+/// <summary>
+/// Окно без системной рамки, но с нативным поведением: перетаскивание, ресайз
+/// за края, Aero Snap и двойной клик по заголовку — через WM_NCHITTEST.
+/// </summary>
+public abstract class ModernWindow : Form
+{
+    public const int CaptionHeight = 40;
+    private const int EdgeSize = 6;
+
+    private const int HTCLIENT = 1;
+    private const int HTCAPTION = 2;
+    private const int HTLEFT = 10;
+    private const int HTRIGHT = 11;
+    private const int HTTOP = 12;
+    private const int HTTOPLEFT = 13;
+    private const int HTTOPRIGHT = 14;
+    private const int HTBOTTOM = 15;
+    private const int HTBOTTOMLEFT = 16;
+    private const int HTBOTTOMRIGHT = 17;
+
+    private readonly List<CaptionButton> _buttons = new();
+    private CaptionButton? _maxButton;
+
+    private string _title = "";
+    private string _titleSuffix = "";
+
+    protected ModernWindow()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        DoubleBuffered = true;
+        BackColor = Ui.Bg;
+        Font = new Font("Segoe UI", 9.75f);
+        KeyPreview = true;
+    }
+
+    /// <summary>Заголовок: «{title} {suffix}», suffix рисуется приглушённым.</summary>
+    protected void SetCaption(string title, string suffix = "")
+    {
+        _title = title;
+        _titleSuffix = suffix;
+        Invalidate(new Rectangle(0, 0, Width, CaptionHeight));
+    }
+
+    /// <summary>Добавляет кнопки свернуть/развернуть/закрыть в правый угол заголовка.</summary>
+    protected void AddCaptionButtons()
+    {
+        var min = new CaptionButton(CaptionGlyph.Minimize);
+        var max = new CaptionButton(CaptionGlyph.Maximize);
+        var close = new CaptionButton(CaptionGlyph.Close) { IsClose = true };
+
+        min.Click += () => WindowState = FormWindowState.Minimized;
+        max.Click += ToggleMaximized;
+        close.Click += Close;
+
+        _buttons.AddRange(new[] { min, max, close });
+        _maxButton = max;
+
+        Controls.AddRange(_buttons.Cast<Control>().ToArray());
+        LayoutCaptionButtons();
+    }
+
+    protected void ToggleMaximized()
+    {
+        WindowState = WindowState == FormWindowState.Maximized
+            ? FormWindowState.Normal
+            : FormWindowState.Maximized;
+    }
+
+    private void LayoutCaptionButtons()
+    {
+        var x = ClientSize.Width;
+        var y = (CaptionHeight - CaptionButton.BarHeight) / 2;
+
+        for (var i = _buttons.Count - 1; i >= 0; i--)
+        {
+            var button = _buttons[i];
+            x -= button.Width;
+            button.Location = new Point(x, y);
+        }
+    }
+
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        LayoutCaptionButtons();
+
+        if (_maxButton is not null)
+        {
+            _maxButton.Glyph = WindowState == FormWindowState.Maximized
+                ? CaptionGlyph.Restore
+                : CaptionGlyph.Maximize;
+        }
+
+        Invalidate(new Rectangle(0, 0, Width, CaptionHeight + 1));
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+
+        // Скруглённые углы Win11; на Win10 атрибут игнорируется — останутся прямые.
+        var preference = 2; // DWMWCP_ROUND
+        _ = DwmSetWindowAttribute(Handle, 33, ref preference, sizeof(int));
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        UpdateMaximizedBounds();
+    }
+
+    protected override void OnLocationChanged(EventArgs e)
+    {
+        base.OnLocationChanged(e);
+        if (WindowState == FormWindowState.Normal)
+        {
+            UpdateMaximizedBounds();
+        }
+    }
+
+    /// <summary>Безрамочное окно при развороте перекрывает панель задач — ограничиваем.</summary>
+    private void UpdateMaximizedBounds()
+    {
+        var area = Screen.FromControl(this).WorkingArea;
+        MaximizedBounds = new Rectangle(
+            area.X + 1, area.Y + 1,
+            Math.Max(0, area.Width - 2), Math.Max(0, area.Height - 2));
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        const int WM_NCHITTEST = 0x84;
+
+        if (m.Msg == WM_NCHITTEST)
+        {
+            // Координаты знаковые: на мультипмониторной конфигурации бывают отрицательные.
+            var lParam = m.LParam.ToInt64();
+            var screenPoint = new Point((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF));
+            var p = PointToClient(screenPoint);
+
+            var maximized = WindowState == FormWindowState.Maximized;
+
+            if (!maximized)
+            {
+                var left = p.X <= EdgeSize;
+                var right = p.X >= ClientSize.Width - EdgeSize;
+                var top = p.Y <= EdgeSize;
+                var bottom = p.Y >= ClientSize.Height - EdgeSize;
+
+                var code = HTCLIENT;
+                if (left && top) code = HTTOPLEFT;
+                else if (right && top) code = HTTOPRIGHT;
+                else if (left && bottom) code = HTBOTTOMLEFT;
+                else if (right && bottom) code = HTBOTTOMRIGHT;
+                else if (left) code = HTLEFT;
+                else if (right) code = HTRIGHT;
+                else if (top) code = HTTOP;
+                else if (bottom) code = HTBOTTOM;
+
+                if (code != HTCLIENT)
+                {
+                    m.Result = (IntPtr)code;
+                    return;
+                }
+            }
+
+            if (p.Y < CaptionHeight && p.X >= 0 && p.X < ClientSize.Width)
+            {
+                m.Result = (IntPtr)HTCAPTION;
+                return;
+            }
+        }
+
+        base.WndProc(ref m);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+
+        var g = e.Graphics;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+        var x = 16f;
+        const float centerY = CaptionHeight / 2f;
+
+        if (_title.Length > 0)
+        {
+            using var bold = new Font(Font, FontStyle.Bold);
+            x = DrawText(g, _title, bold, Ui.Ink, x, centerY);
+        }
+
+        if (_titleSuffix.Length > 0)
+        {
+            _ = DrawText(g, "  " + _titleSuffix, Font, Ui.Muted, x, centerY);
+        }
+
+        using var pen = new Pen(Ui.Line);
+        g.DrawLine(pen, 0, CaptionHeight - 1, Width, CaptionHeight - 1);
+    }
+
+    private static float DrawText(Graphics g, string text, Font font, Color color, float x, float centerY)
+    {
+        var size = g.MeasureString(text, font);
+        using var brush = new SolidBrush(color);
+        g.DrawString(text, font, brush, x, centerY - size.Height / 2f);
+        return x + size.Width;
+    }
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+}
+
+/// <summary>
+/// Кнопка панели заголовка: компактная, скруглённая подсветка при наведении.
+/// </summary>
+public sealed class CaptionButton : Control
+{
+    public const int BarHeight = 30;
+
+    private bool _hover;
+    private bool _pressed;
+    private CaptionGlyph _glyph;
+
+    public CaptionButton(CaptionGlyph glyph)
+    {
+        _glyph = glyph;
+        Size = new Size(40, BarHeight);
+        Cursor = Cursors.Hand;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+    }
+
+    public CaptionGlyph Glyph
+    {
+        get => _glyph;
+        set
+        {
+            _glyph = value;
+            Invalidate();
+        }
+    }
+
+    public bool IsClose { get; init; }
+
+    public new event Action? Click;
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hover = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hover = false;
+        _pressed = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _pressed = true;
+            Invalidate();
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _pressed = false;
+        Invalidate();
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnClick(EventArgs e)
+    {
+        base.OnClick(e);
+        Click?.Invoke();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+        if (_hover)
+        {
+            var rect = new Rectangle(1, 1, Width - 3, Height - 3);
+            using var path = Ui.RoundPath(rect, 6);
+            using var brush = new SolidBrush(IsClose ? Ui.CloseRed : Ui.HoverOverlay);
+            g.FillPath(brush, path);
+        }
+
+        var color = !_hover ? Ui.Muted : _pressed ? Ui.Muted : Color.White;
+
+        using var font = Ui.GlyphFont(8f);
+        var size = g.MeasureString(Ui.Glyph(Glyph), font);
+        using var textBrush = new SolidBrush(color);
+        g.DrawString(Ui.Glyph(Glyph), font, textBrush,
+            (Width - size.Width) / 2f, (Height - size.Height) / 2f);
+    }
+}
+
+/// <summary>Кастомная плоская кнопка со скруглением и состояниями hover/pressed/disabled.</summary>
+public sealed class UiButton : Control
+{
+    private bool _hover;
+    private bool _pressed;
+
+    public UiButton(string text)
+    {
+        Text = text;
+        Height = 42;
+        Cursor = Cursors.Hand;
+        Font = new Font("Segoe UI", 10f, FontStyle.Bold);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+    }
+
+    public Color Fill { get; set; } = Ui.Accent;
+
+    public Color FillHover { get; set; } = Ui.AccentHover;
+
+    public Color FillPressed { get; set; } = Color.FromArgb(0x4F, 0x46, 0xE5);
+
+    public Color DisabledFill { get; set; } = Ui.Line;
+
+    public Color TextColor { get; set; } = Color.White;
+
+    public Color DisabledText { get; set; } = Ui.Muted;
+
+    /// <summary>Призрачная кнопка: фон карточки + тонкая рамка.</summary>
+    public bool Ghost { get; set; }
+
+    public int Radius { get; set; } = 10;
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hover = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hover = false;
+        _pressed = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _pressed = true;
+            Invalidate();
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        _pressed = false;
+        Invalidate();
+        base.OnMouseUp(e);
+    }
+
+    protected override void OnEnabledChanged(EventArgs e)
+    {
+        Invalidate();
+        base.OnEnabledChanged(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
+        using var path = Ui.RoundPath(bounds, Radius);
+
+        if (Ghost)
+        {
+            using var bg = new SolidBrush(_hover ? Ui.Card : Ui.CardDeep);
+            g.FillPath(bg, path);
+            using var border = new Pen(Ui.Line);
+            g.DrawPath(border, path);
+        }
+        else
+        {
+            Color fill;
+            if (!Enabled) fill = DisabledFill;
+            else if (_pressed) fill = FillPressed;
+            else if (_hover) fill = FillHover;
+            else fill = Fill;
+
+            using var bg = new SolidBrush(fill);
+            g.FillPath(bg, path);
+        }
+
+        var textColor = !Enabled ? DisabledText : TextColor;
+        TextRenderer.DrawText(
+            g, Text, Font, bounds, textColor,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+            TextFormatFlags.EndEllipsis);
+    }
+}
+
+/// <summary>Тумблер-переключатель в тёмной теме.</summary>
+public sealed class UiToggle : Control
+{
+    private bool _hover;
+    private bool _checked;
+
+    public UiToggle(string text)
+    {
+        Text = text;
+        Height = 36;
+        Cursor = Cursors.Hand;
+        Font = new Font("Segoe UI", 9f);
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+    }
+
+    public bool Checked
+    {
+        get => _checked;
+        set
+        {
+            if (_checked == value) return;
+            _checked = value;
+            Invalidate();
+            CheckedChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public event EventHandler? CheckedChanged;
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hover = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hover = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnClick(EventArgs e)
+    {
+        Checked = !Checked;
+        base.OnClick(e);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+        // двухстрочный текст справа от тумблера
+        var textRect = new Rectangle(48, 0, Width - 48, Height);
+        TextRenderer.DrawText(
+            g, Text, Font, textRect,
+            _hover ? Ui.Ink : Ui.Muted,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left |
+            TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis);
+
+        // дорожка
+        const int trackWidth = 38, trackHeight = 20;
+        var track = new Rectangle(0, (Height - trackHeight) / 2, trackWidth, trackHeight);
+        using var trackPath = Ui.RoundPath(track, trackHeight / 2);
+
+        using (var fill = new SolidBrush(_checked ? Ui.Accent : Ui.Field))
+        {
+            g.FillPath(fill, trackPath);
+        }
+
+        using (var border = new Pen(_checked ? Ui.Accent : Ui.Line))
+        {
+            g.DrawPath(border, trackPath);
+        }
+
+        // ручка: справа = включено
+        const int knobSize = 14;
+        var knobX = _checked ? track.Right - knobSize - 3 : track.X + 3;
+        var knob = new Rectangle(knobX, track.Y + (trackHeight - knobSize) / 2, knobSize, knobSize);
+        using var knobFill = new SolidBrush(Color.White);
+        g.FillEllipse(knobFill, knob);
+    }
+}
+
+/// <summary>Поле ввода: скруглённая подложка, рамка подсвечивается при фокусе.</summary>
+public sealed class UiInput : Panel
+{
+    public readonly TextBox Box = new();
+
+    private bool _focused;
+
+    public UiInput(string placeholder = "")
+    {
+        Height = 44;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                 ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+
+        Box.BorderStyle = BorderStyle.None;
+        Box.Dock = DockStyle.Fill;
+        Box.Font = new Font("Segoe UI", 11f);
+        Box.ForeColor = Ui.Ink;
+        Box.BackColor = Ui.Field;
+        Box.PlaceholderText = placeholder;
+        Box.Padding = new Padding(0);
+
+        var pad = new Padding(14, 0, 14, 0);
+        Box.Margin = pad;
+        Padding = pad;
+
+        Box.Enter += (_, _) => { _focused = true; Invalidate(); };
+        Box.Leave += (_, _) => { _focused = false; Invalidate(); };
+
+        Controls.Add(Box);
+    }
+
+    public string InputText
+    {
+        get => Box.Text;
+        set => Box.Text = value;
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        var bounds = new Rectangle(0, 0, Width - 1, Height - 1);
+        using var path = Ui.RoundPath(bounds, 10);
+
+        using var fill = new SolidBrush(Ui.Field);
+        g.FillPath(fill, path);
+
+        using var border = new Pen(_focused ? Ui.Accent : Ui.Line, _focused ? 1.6f : 1f);
+        g.DrawPath(border, path);
+    }
+}

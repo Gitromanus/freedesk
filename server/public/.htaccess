@@ -1,0 +1,29 @@
+# FreeDesk signaling API
+# Требуется mod_rewrite (на Beget включён по умолчанию).
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Apache в CGI-режиме часто теряет Authorization — восстанавливаем для PHP.
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Всё, что не файл и не каталог, отдаём во фронт-контроллер.
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+</IfModule>
+
+# Не отдавать наружу то, что не должно быть публичным.
+<FilesMatch "^(config\.php|bootstrap\.php|composer\.(json|lock))$">
+    Require all denied
+</FilesMatch>
+
+# Если всё залито в одну папку — закрываем исходники от веба.
+RewriteRule ^(src|migrations|scripts|tests)/ - [F,L]
+
+Options -Indexes

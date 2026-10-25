@@ -1,0 +1,18 @@
+# секреты
+server/config.php
+
+# пароли/следы деплоя
+fd_ssh_pass.txt
+
+# сборки
+bin/
+obj/
+agent/publish/
+*.user
+
+# служебное
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

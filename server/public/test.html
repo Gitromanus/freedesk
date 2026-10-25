@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FreeDesk — проверка сигналинга</title>
+<style>
+    :root { color-scheme: light dark; }
+    body { font: 14px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; max-width: 760px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .hint { opacity: .65; margin: 0 0 20px; }
+    fieldset { border: 1px solid #8884; border-radius: 10px; padding: 14px; margin: 0 0 14px; }
+    legend { padding: 0 6px; opacity: .8; font-size: 13px; }
+    button { padding: 6px 12px; border-radius: 6px; border: 1px solid #8886; background: #8882; cursor: pointer; font: inherit; }
+    button:disabled { opacity: .45; cursor: default; }
+    button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+    input { padding: 6px 8px; border-radius: 6px; border: 1px solid #8886; background: transparent; width: 130px; font: inherit; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .id { font: 600 22px ui-monospace, Consolas, monospace; letter-spacing: 3px; }
+    #log { font: 12px/1.45 ui-monospace, Consolas, monospace; white-space: pre-wrap; background: #8881; border-radius: 8px; padding: 10px; height: 200px; overflow: auto; margin: 0; }
+    .muted { opacity: .6; }
+    ul { margin: 0; padding-left: 18px; }
+</style>
+</head>
+<body>
+<h1>FreeDesk — проверка сигналинга</h1>
+<p class="hint">Каждое окно = отдельное устройство. Откройте эту страницу в двух окнах, зарегистрируйте оба и подключитесь по ID.</p>
+
+<fieldset>
+    <legend>Это устройство</legend>
+    <div class="row">
+        <button id="btn-reg" class="primary">Зарегистрировать</button>
+        <span id="my-id" class="id">— — — — — — — — —</span>
+    </div>
+    <p class="muted" id="my-name" style="margin:8px 0 0"></p>
+</fieldset>
+
+<fieldset>
+    <legend>Подключиться</legend>
+    <div class="row">
+        <input id="target" inputmode="numeric" maxlength="9" placeholder="123456789">
+        <button id="btn-connect">Подключиться</button>
+        <span id="connect-status" class="muted"></span>
+    </div>
+</fieldset>
+
+<fieldset>
+    <legend>Входящие заявки</legend>
+    <ul id="incoming"><li class="muted">пока пусто</li></ul>
+</fieldset>
+
+<fieldset>
+    <legend>Лог</legend>
+    <pre id="log"></pre>
+</fieldset>
+
+<script>
+const API = location.pathname.replace(/[^/]*$/, '').replace(/\/$/, '');
+const KEY = { token: 'fd.token', id: 'fd.id', name: 'fd.name' };
+
+const store = {
+    get token() { return sessionStorage.getItem(KEY.token); },
+    get id() { return sessionStorage.getItem(KEY.id); },
+    get name() { return sessionStorage.getItem(KEY.name); },
+    set(token, id, name) {
+        sessionStorage.setItem(KEY.token, token);
+        sessionStorage.setItem(KEY.id, id);
+        sessionStorage.setItem(KEY.name, name);
+    },
+};
+
+const $ = (sel) => document.querySelector(sel);
+const logEl = $('#log');
+
+function log(text) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += `[${t}] ${text}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function api(method, path, body) {
+    const headers = {};
+    if (body) headers['Content-Type'] = 'application/json';
+    if (store.token) headers['Authorization'] = 'Bearer ' + store.token;
+
+    const res = await fetch(API + path, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+    });
+
+    const data = await res.json().catch(() => ({ ok: false, error: 'bad_response' }));
+    if (!res.ok || !data.ok) {
+        throw new Error(`${data.error || res.status}: ${data.message || 'request failed'}`);
+    }
+    return data;
+}
+
+let active = null;      // { sid, since }
+let lastPresence = 0;
+
+function render() {
+    const id = store.id;
+    $('#my-id').textContent = id ? id.replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3') : '— — — — — — — — —';
+    $('#my-name').textContent = id ? `${store.name} · подключено` : 'не зарегистрировано';
+    $('#btn-reg').disabled = Boolean(id);
+}
+
+async function register() {
+    $('#btn-reg').disabled = true;
+    try {
+        const d = await api('POST', '/api/v1/device/register', {
+            name: navigator.platform || 'browser',
+            os: navigator.platform || 'browser',
+        });
+        store.set(d.device_token, d.public_id, navigator.platform || 'browser');
+        log(`зарегистрировано: ${d.public_id}`);
+        render();
+    } catch (e) {
+        log('ошибка регистрации: ' + e.message);
+        $('#btn-reg').disabled = false;
+    }
+}
+
+async function connect() {
+    const target = $('#target').value.trim();
+    if (!/^\d{9}$/.test(target)) {
+        log('ID должен быть 9 цифр');
+        return;
+    }
+    try {
+        const d = await api('POST', '/api/v1/session/request', { target_id: target });
+        active = { sid: d.session_id, since: 0 };
+        $('#connect-status').textContent = `заявка отправлена на ${d.target.name}`;
+        log(`сессия ${d.session_id} создана, ждём подтверждения`);
+    } catch (e) {
+        $('#connect-status').textContent = '';
+        log('не удалось подключиться: ' + e.message);
+    }
+}
+
+async function answer(sid, action) {
+    try {
+        const d = await api('POST', '/api/v1/session/answer', { session_id: sid, action });
+        log(`сессия ${sid}: ${d.state}`);
+
+        if (action === 'accept') {
+            active = { sid, since: 0 };
+            $('#connect-status').textContent = 'входящая сессия активна';
+        }
+    } catch (e) {
+        log('ошибка ответа: ' + e.message);
+    }
+}
+
+function renderIncoming(items) {
+    const list = $('#incoming');
+
+    if (!items.length) {
+        list.innerHTML = '<li class="muted">пока пусто</li>';
+        return;
+    }
+
+    list.innerHTML = '';
+    for (const item of items) {
+        const li = document.createElement('li');
+        const label = document.createElement('span');
+        label.textContent = `${item.from.name} (${item.from.public_id}) `;
+
+        const ok = document.createElement('button');
+        ok.textContent = 'Принять';
+        ok.onclick = () => answer(item.session_id, 'accept');
+
+        const no = document.createElement('button');
+        no.textContent = 'Отклонить';
+        no.style.marginLeft = '6px';
+        no.onclick = () => answer(item.session_id, 'reject');
+
+        li.append(label, ok, no);
+        list.append(li);
+    }
+}
+
+async function tick() {
+    if (!store.token) return;
+
+    try {
+        if (Date.now() - lastPresence > 10000) {
+            await api('POST', '/api/v1/presence');
+            lastPresence = Date.now();
+        }
+
+        const inbox = await api('GET', '/api/v1/session/incoming');
+        renderIncoming(inbox.incoming);
+
+        if (active) {
+            const p = await api('GET',
+                `/api/v1/session/poll?session_id=${active.sid}&since=${active.since}`);
+            active.since = p.cursor;
+            $('#connect-status').textContent = `сессия ${p.session.state} (${p.session.role})`;
+
+            for (const msg of p.messages) {
+                log(`<- ${msg.type}: ${JSON.stringify(msg.payload).slice(0, 160)}`);
+            }
+
+            if (p.session.state === 'ended') {
+                log('сессия завершена');
+                active = null;
+                $('#connect-status').textContent = '';
+            }
+        }
+    } catch (e) {
+        log('poll: ' + e.message);
+        if (String(e.message).includes('session_ended')) active = null;
+    }
+}
+
+$('#btn-reg').onclick = register;
+$('#btn-connect').onclick = connect;
+
+render();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
