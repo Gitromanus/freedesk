@@ -21,6 +21,8 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly AgentConfig? _config;
     private string? _password;
     private (string Salt, int Iterations, byte[] Hash)? _pendingCredential;
+    private long _totalFrames;
+    private bool _noFramesWarned;
     private FileSender? _fileSender;
     private FileReceiver? _fileReceiver;
     private H264Decoder? _decoder;
@@ -198,6 +200,8 @@ public sealed class ViewerSession : IAsyncDisposable
             SavePendingCredential();
             StatusChanged?.Invoke("канал установлен");
             Connected?.Invoke();
+
+            _ = WarnIfNoFramesAsync();
         };
 
         peer.ControlReceived += json =>
@@ -377,9 +381,25 @@ public sealed class ViewerSession : IAsyncDisposable
         }
     }
 
+    /// <summary>Подключились, но кадров нет — подсказываем, где искать причину.</summary>
+    private async Task WarnIfNoFramesAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(6));
+
+        if (_totalFrames > 0 || _noFramesWarned)
+        {
+            return;
+        }
+
+        _noFramesWarned = true;
+        StatusChanged?.Invoke("кадры не приходят: проверьте openh264.dll на хосте и RDP-сессию");
+        Log.Warn("за 6 секунд не пришло ни одного кадра");
+    }
+
     /// <summary>Пришёл кадр от хоста: JPEG или H.264 access unit.</summary>
     private void OnRemoteFrame(byte[] frame)
     {
+        _totalFrames++;
         Bitmap? bitmap;
 
         if (_decoder is not null)

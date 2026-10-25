@@ -188,8 +188,8 @@ public sealed class ViewerForm : ModernWindow
         LayoutOverlays();
     }
 
-    /// <summary>Отступ плавающей полосы от верхнего края: не липнет к заголовку.</summary>
-    private const int BarTop = 40;
+    /// <summary>Отступ плавающей полосы от верхнего края: чуть ниже заголовка, но не «в воздухе».</summary>
+    private const int BarTop = 10;
 
     /// <summary>Плавающая полоса поверх картинки: мониторы, отключение, сворачивание.</summary>
     private void LayoutOverlays()

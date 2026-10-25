@@ -706,7 +706,9 @@ public sealed class MainForm : ModernWindow
     {
         _hero.Visible = false;
 
-        // экрану полезнее место — панель сама сворачивается
+        // экрану полезнее место — панель сама сворачивается, отступы убираем
+        _mainArea.Padding = new Padding(0);
+
         if (!_sidebarCollapsed)
         {
             _collapsedForSession = true;
@@ -741,6 +743,7 @@ public sealed class MainForm : ModernWindow
     {
         _session = null;
         SetCaption("FreeDesk");
+        _mainArea.Padding = new Padding(24);
 
         if (_viewerForm is not null)
         {

@@ -9,6 +9,7 @@ public sealed class GdiScreenCapture : IScreenCapture
 {
     private const int SmCxScreen = 0;
     private const int SmCyScreen = 1;
+    private const int SmRemoteSession = 0x1000;
     private const uint SrcCopy = 0x00CC0020;    private const uint CaptureBlt = 0x40000000;
     private const uint DibRgbColors = 0;
 
@@ -23,6 +24,9 @@ public sealed class GdiScreenCapture : IScreenCapture
     private readonly bool _canPrintWindow;
     private BitmapInfo _bitmapInfo;
     private bool _disposed;
+
+    /// <summary>Мы внутри RDP-сессии: DWM-вывод недоступен, PrintWindow бесполезен.</summary>
+    private static readonly bool RemoteSession = GetSystemMetrics(SmRemoteSession) != 0;
 
     public int Width { get; }
     public int Height { get; }
@@ -77,10 +81,9 @@ public sealed class GdiScreenCapture : IScreenCapture
 
         var desktopHwnd = GetDesktopWindow();
 
-        // Пробуем PrintWindow с PW_RENDERFULLCONTENT — захватывает скомпозированный
-        // DWM-вывод без разрывов (в отличие от BitBlt). Работает только для основного
-        // монитора: окно рисуется от (0,0), а нам нужен произвольный кусок.
-        if (!_canPrintWindow || !PrintWindow(desktopHwnd, _memoryDc, 0x00000002)) // PW_RENDERFULLCONTENT
+        // PrintWindow рисует скомпозированный DWM-вывод без разрывов, но в RDP-сессии
+        // он отдаёт пустоту — там снимаем обычным BitBlt с экранного DC.
+        if (!_canPrintWindow || RemoteSession || !PrintWindow(desktopHwnd, _memoryDc, 0x00000002)) // PW_RENDERFULLCONTENT
         {
             if (!BitBlt(_memoryDc, 0, 0, Width, Height, _screenDc, _originX, _originY, SrcCopy | CaptureBlt))
             {

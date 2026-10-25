@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using FreeDesk.Agent.Codec;
 using FreeDesk.Agent.Files;
 using FreeDesk.Agent.Input;
 
@@ -481,6 +482,17 @@ public sealed class AgentRuntime
         {
             case "offer":
                 var offerCodec = ReadCodec(message.Payload);
+
+                // Кодек выбрал зритель; если у нас нет кодека — лучше закрыть сессию
+                // с внятной причиной, чем показывать чёрный/пустой экран.
+                if (offerCodec == VideoCodec.H264 && !H264Decoder.IsAvailable())
+                {
+                    Log.Error("нет openh264.dll — H.264 невозможен, закрываю сессию");
+                    StatusChanged?.Invoke("Нет openh264.dll рядом с exe — положите файл и повторите");
+                    await TryAnswerAsync(session.Id, "end", ct);
+                    break;
+                }
+
                 AttachTransportIfNeeded(session, offerCodec);
                 var answer = await session.Transport!.CreateAnswerAsync(message.Payload, ct);
                 await _client.SignalAsync(session.Id, "answer", answer, ct);
