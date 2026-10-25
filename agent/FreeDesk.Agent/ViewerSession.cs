@@ -7,6 +7,9 @@ namespace FreeDesk.Agent;
 /// <summary>Монитор на стороне хоста (для кнопок переключения).</summary>
 public sealed record RemoteDisplay(int Index, int Width, int Height, bool Primary);
 
+/// <summary>Ответ на запрос пароля: сам пароль и просьба запомнить его для этого устройства.</summary>
+public sealed record PasswordReply(string Password, bool Remember);
+
 /// <summary>Сторона зрителя: инициирует сессию, принимает кадры, отправляет ввод.</summary>
 public sealed class ViewerSession : IAsyncDisposable
 {
@@ -14,7 +17,9 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly string _targetId;
     private readonly VideoCodec _codec;
     private readonly bool _passwordFromCli;
+    private readonly AgentConfig? _config;
     private string? _password;
+    private (string Salt, int Iterations, byte[] Hash)? _pendingCredential;
     private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
@@ -45,18 +50,20 @@ public sealed class ViewerSession : IAsyncDisposable
 
     /// <summary>
     /// Спросить у пользователя пароль устройства (unattended-доступ).
-    /// Возвращает null, если пользователь отказался.
+    /// null — пользователь отказался.
     /// </summary>
-    public Func<Task<string?>>? PasswordPrompt { get; set; }
+    public Func<Task<PasswordReply?>>? PasswordPrompt { get; set; }
 
     public ViewerSession(
-        SignalingClient client, string targetId, VideoCodec codec = VideoCodec.Mjpeg, string? password = null)
+        SignalingClient client, string targetId, VideoCodec codec = VideoCodec.Mjpeg, string? password = null,
+        AgentConfig? config = null)
     {
         _client = client;
         _targetId = targetId;
         _codec = codec;
         _password = password;
         _passwordFromCli = _password is not null;
+        _config = config;
         _decoder = codec == VideoCodec.H264 ? new H264Decoder() : null;
     }
 
@@ -152,6 +159,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
         peer.Connected += () =>
         {
+            SavePendingCredential();
             StatusChanged?.Invoke("канал установлен");
             Connected?.Invoke();
         };
@@ -355,34 +363,56 @@ public sealed class ViewerSession : IAsyncDisposable
 
         var nonce = nonceValue.GetString();
         var salt = saltValue.GetString();
+        var iterations = iterationsValue.GetInt32();
 
         if (string.IsNullOrEmpty(nonce) || string.IsNullOrEmpty(salt))
         {
             return;
         }
 
-        if (string.IsNullOrEmpty(_password) && PasswordPrompt is not null)
-        {
-            Log.Info("устройство требует пароль — спрашиваю у пользователя");
-            StatusChanged?.Invoke("устройство требует пароль");
-            _password = await PasswordPrompt();
-        }
-
-        if (string.IsNullOrEmpty(_password))
-        {
-            Log.Warn(PasswordPrompt is null
-                ? "пароль устройства не введён — в этом режиме его негде спросить (нужен --password)"
-                : "пароль устройства не введён — диалог закрыт без ввода");
-
-            StatusChanged?.Invoke("нет пароля устройства");
-            await RejectAsync(ct);
-            return;
-        }
-
         try
         {
-            var hash = UnattendedAuth.Derive(_password!, Convert.FromBase64String(salt), iterationsValue.GetInt32());
-            var proof = UnattendedAuth.ComputeProof(hash, nonce, iterationsValue.GetInt32());
+            // Сохранённый ранее хеш (галка «запомнить») — спрашивать нечего.
+            if (_config?.TryGetSavedSecret(_targetId, salt) is { } saved)
+            {
+                var savedProof = UnattendedAuth.ComputeProof(saved, nonce, iterations);
+                await _client.SignalAsync(_sessionId!, "auth", new { proof = savedProof }, ct);
+                Log.Info("пароль взят из сохранённых для этого устройства");
+                StatusChanged?.Invoke("вход по сохранённому паролю");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(_password) && PasswordPrompt is not null)
+            {
+                Log.Info("устройство требует пароль — спрашиваю у пользователя");
+                StatusChanged?.Invoke("устройство требует пароль");
+
+                var reply = await PasswordPrompt();
+                _password = reply?.Password;
+
+                if (reply is { Remember: true } && !string.IsNullOrEmpty(reply.Password))
+                {
+                    // Сохраним только после успешного подключения (см. SavePendingCredential).
+                    _pendingCredential = (
+                        salt,
+                        iterations,
+                        UnattendedAuth.Derive(reply.Password, Convert.FromBase64String(salt), iterations));
+                }
+            }
+
+            if (string.IsNullOrEmpty(_password))
+            {
+                Log.Warn(PasswordPrompt is null
+                    ? "пароль устройства не введён — в этом режиме его негде спросить (нужен --password)"
+                    : "пароль устройства не введён — диалог закрыт без ввода");
+
+                StatusChanged?.Invoke("нет пароля устройства");
+                await RejectAsync(ct);
+                return;
+            }
+
+            var hash = UnattendedAuth.Derive(_password!, Convert.FromBase64String(salt), iterations);
+            var proof = UnattendedAuth.ComputeProof(hash, nonce, iterations);
 
             await _client.SignalAsync(_sessionId!, "auth", new { proof }, ct);
             Log.Info("пароль отправлен, ждём подтверждения");
@@ -392,6 +422,21 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             StatusChanged?.Invoke("устройство прислало некорректный запрос пароля");
         }
+    }
+
+    /// <summary>Сохраняет пароль в профиль — только после того, как хост его принял.</summary>
+    private void SavePendingCredential()
+    {
+        if (_config is null || _pendingCredential is not { } credential)
+        {
+            return;
+        }
+
+        _config.RememberSavedSecret(_targetId, credential.Salt, credential.Iterations, credential.Hash);
+        _config.Save();
+        _pendingCredential = null;
+
+        Log.Info($"пароль устройства сохранён для {_targetId}");
     }
 
     /// <summary>Отказаться от сессии (нет пароля, отмена ввода) без исключений наружу.</summary>

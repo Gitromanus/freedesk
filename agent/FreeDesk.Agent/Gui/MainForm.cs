@@ -34,10 +34,6 @@ public sealed class MainForm : ModernWindow
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronLeft);
     private readonly CaptionButton _settingsBtn = new(CaptionGlyph.Settings);
 
-    private readonly DoubleBufferedPanel _viewBar = new();
-    private readonly Label _viewTitle = new();
-    private readonly UiButton _disconnectBtn = new("Отключиться") { Ghost = true, Radius = 8 };
-
     private ViewerForm? _viewerForm;
     private ViewerSession? _session;
     private bool _connecting;
@@ -54,6 +50,7 @@ public sealed class MainForm : ModernWindow
     private readonly string _recentPath;
     private Color _statusColor = Ui.Amber;
     private int _statusDotY;
+    private readonly ToolTip _sidebarTip = new();
 
     public MainForm(
         AgentConfig config, SignalingClient client, AgentRuntime runtime, CancellationTokenSource cts,
@@ -219,17 +216,31 @@ public sealed class MainForm : ModernWindow
 
         // ── сворачивание панели и настройки ──
         _collapseBtn.Size = new Size(32, 32);
-        _collapseBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _collapseBtn.Anchor = AnchorStyles.None;
         _collapseBtn.Click += () => ToggleSidebar();
 
         _settingsBtn.Size = new Size(32, 32);
-        _settingsBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _settingsBtn.Anchor = AnchorStyles.None;
         _settingsBtn.Click += () => OpenSettings();
+
+        _sidebarTip.SetToolTip(_collapseBtn, "Свернуть панель");
+        _sidebarTip.SetToolTip(_settingsBtn, "Настройки");
 
         _sidebar.Resize += (_, _) =>
         {
-            _settingsBtn.Location = new Point(_sidebar.Width - _settingsBtn.Width - 12, 48);
-            _collapseBtn.Location = new Point(_sidebar.Width - _collapseBtn.Width - 12, 10);
+            if (_sidebarCollapsed)
+            {
+                _collapseBtn.Location = new Point((_sidebar.Width - _collapseBtn.Width) / 2, 10);
+                _settingsBtn.Location = new Point(
+                    (_sidebar.Width - _settingsBtn.Width) / 2,
+                    Math.Max(88, _sidebar.Height - _settingsBtn.Height - 12));
+            }
+            else
+            {
+                _settingsBtn.Location = new Point(_sidebar.Width - _settingsBtn.Width - 12, 48);
+                _collapseBtn.Location = new Point(_sidebar.Width - _collapseBtn.Width - 12, 10);
+            }
+
             _recentList.Height = Math.Max(48, _sidebar.Height - _recentList.Top - 20);
             _recentEmpty.Visible = !_sidebarCollapsed && _recentList.Items.Count == 0;
         };
@@ -270,10 +281,21 @@ public sealed class MainForm : ModernWindow
             e.Graphics.DrawLine(pen, 28, y, _sidebar.Width - 28, y);
         }
 
-        // цветная точка статуса
+        // цветная точка статуса: в свёрнутом виде — по центру рейла,
+        // в развёрнутом — рядом с подписью «Онлайн…»
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+
+        var dotX = _sidebarCollapsed ? (_sidebar.Width - 10) / 2 : 30;
+        var dotY = _sidebarCollapsed ? Math.Max(72, (_sidebar.Height - 10) / 2) : _statusDotY;
+
+        if (_sidebarCollapsed)
+        {
+            using var ring = new Pen(Ui.Line);
+            e.Graphics.DrawEllipse(ring, dotX - 5, dotY - 5, 20, 20);
+        }
+
         using var dot = new SolidBrush(_statusColor);
-        e.Graphics.FillEllipse(dot, 30, _statusDotY, 10, 10);
+        e.Graphics.FillEllipse(dot, dotX, dotY, 10, 10);
     }
 
     private void ToggleSidebar()
@@ -284,6 +306,7 @@ public sealed class MainForm : ModernWindow
         {
             _sidebar.Width = SidebarCollapsedWidth;
             _collapseBtn.Glyph = CaptionGlyph.ChevronRight;
+            _sidebarTip.SetToolTip(_collapseBtn, "Развернуть панель");
 
             foreach (Control c in _sidebar.Controls)
             {
@@ -294,6 +317,7 @@ public sealed class MainForm : ModernWindow
         {
             _sidebar.Width = SidebarWidth;
             _collapseBtn.Glyph = CaptionGlyph.ChevronLeft;
+            _sidebarTip.SetToolTip(_collapseBtn, "Свернуть панель");
 
             foreach (Control c in _sidebar.Controls)
             {
@@ -405,8 +429,6 @@ public sealed class MainForm : ModernWindow
         _mainArea.BackColor = Ui.Bg;
         _mainArea.Padding = new Padding(24);
 
-        BuildViewBar();
-
         _hero.Dock = DockStyle.Fill;
         _hero.BackColor = Ui.Bg;
         _hero.Paint += DrawHero;
@@ -499,38 +521,6 @@ public sealed class MainForm : ModernWindow
         g.FillPath(brush, path);
     }
 
-    /// <summary>Панель над встроенным просмотром: кто на связи и кнопка «Отключиться».</summary>
-    private void BuildViewBar()
-    {
-        _viewBar.Dock = DockStyle.Top;
-        _viewBar.Height = 48;
-        _viewBar.BackColor = Ui.Card;
-        _viewBar.Padding = new Padding(16, 8, 12, 8);
-        _viewBar.Visible = false;
-        _viewBar.Paint += (_, e) =>
-        {
-            using var pen = new Pen(Ui.Line);
-            e.Graphics.DrawLine(pen, 0, _viewBar.Height - 1, _viewBar.Width, _viewBar.Height - 1);
-        };
-
-        _viewTitle.Font = new Font("Segoe UI", 9.75f);
-        _viewTitle.ForeColor = Ui.Ink;
-        _viewTitle.BackColor = Ui.Card;
-        _viewTitle.Dock = DockStyle.Fill;
-        _viewTitle.TextAlign = ContentAlignment.MiddleLeft;
-        _viewTitle.AutoEllipsis = true;
-        _viewTitle.Padding = new Padding(8, 0, 0, 0);
-
-        _disconnectBtn.Size = new Size(124, 32);
-        _disconnectBtn.Dock = DockStyle.Right;
-        _disconnectBtn.Click += (_, _) => Disconnect();
-
-        _viewBar.Controls.Add(_viewTitle);
-        _viewBar.Controls.Add(_disconnectBtn);
-        _mainArea.Controls.Add(_viewBar);
-        _viewBar.BringToFront();
-    }
-
     // ─────────── статус ───────────
 
     private void SetStatus(string text, Color color)
@@ -545,7 +535,6 @@ public sealed class MainForm : ModernWindow
         _statusColor = color;
         _sidebar.Invalidate();
     }
-
     // ─────────── жизненный цикл ───────────
 
     private void WireRuntime()
@@ -643,7 +632,7 @@ public sealed class MainForm : ModernWindow
         {
             Disconnect(keepStatus: true);
 
-            _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec));
+            _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec), null, _config);
 
             // Пароль спрашиваем у главного окна: встроенное окно просмотра ещё не создано
             // и не может быть владельцем модального диалога.
@@ -682,7 +671,7 @@ public sealed class MainForm : ModernWindow
             {
             }
 
-            _viewTitle.Text = $"{name} · {FormatId(target)}";
+            SetCaption("FreeDesk", $"· {name} · {FormatId(target)}");
             AddRecent(target, name);
         }
         catch (Exception ex)
@@ -737,18 +726,21 @@ public sealed class MainForm : ModernWindow
             FormBorderStyle = FormBorderStyle.None,
         };
 
-        _viewBar.Visible = true;
-        _viewTitle.Text = $"Подключение · {FormatId(target)}";
+        _viewerForm.DisconnectRequested += () =>
+        {
+            Disconnect();
+            OnSessionEnded();
+        };
+
         _mainArea.Controls.Add(_viewerForm);
         _viewerForm.BringToFront();
-        _viewBar.BringToFront();
         _viewerForm.Show();
     }
 
     private void OnSessionEnded()
     {
         _session = null;
-        _viewBar.Visible = false;
+        SetCaption("FreeDesk");
 
         if (_viewerForm is not null)
         {

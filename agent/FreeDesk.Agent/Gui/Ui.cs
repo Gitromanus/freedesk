@@ -91,9 +91,13 @@ public static class Ui
                 CaptionGlyph.Close => "\uE8BB",
                 CaptionGlyph.ChevronLeft => "\uE76B",
                 CaptionGlyph.ChevronRight => "\uE76C",
+                CaptionGlyph.ChevronDown => "\uE70D",
+                CaptionGlyph.ChevronUp => "\uE70E",
                 CaptionGlyph.Edit => "\uE70F",
                 CaptionGlyph.Delete => "\uE74D",
                 CaptionGlyph.Settings => "\uE713",
+                CaptionGlyph.Monitor => "\uE7F4",
+                CaptionGlyph.Power => "\uE7E8",
                 _ => "?",
             };
         }
@@ -106,9 +110,13 @@ public static class Ui
             CaptionGlyph.Close => "\u2715",
             CaptionGlyph.ChevronLeft => "\u2039",
             CaptionGlyph.ChevronRight => "\u203A",
+            CaptionGlyph.ChevronDown => "\u25BE",
+            CaptionGlyph.ChevronUp => "\u25B4",
             CaptionGlyph.Edit => "\u270E",
             CaptionGlyph.Delete => "\u2715",
             CaptionGlyph.Settings => "\u2699",
+            CaptionGlyph.Monitor => "\u25A3",
+            CaptionGlyph.Power => "\u23FB",
             _ => "?",
         };
     }
@@ -125,9 +133,13 @@ public enum CaptionGlyph
     Close,
     ChevronLeft,
     ChevronRight,
+    ChevronDown,
+    ChevronUp,
     Edit,
     Delete,
     Settings,
+    Monitor,
+    Power,
 }
 
 /// <summary>Панель с двойной буферизацией: без мерцания при перерисовке.</summary>
@@ -184,8 +196,20 @@ public abstract class ModernWindow : Form
     }
 
     /// <summary>Добавляет кнопки свернуть/развернуть/закрыть в правый угол заголовка.</summary>
-    protected void AddCaptionButtons()
+    /// <param name="closeOnly">Только «закрыть» — для диалогов, которым нечего разворачивать.</param>
+    protected void AddCaptionButtons(bool closeOnly = false)
     {
+        if (closeOnly)
+        {
+            var onlyClose = new CaptionButton(CaptionGlyph.Close) { IsClose = true };
+            onlyClose.Click += Close;
+
+            _buttons.Add(onlyClose);
+            Controls.Add(onlyClose);
+            LayoutCaptionButtons();
+            return;
+        }
+
         var min = new CaptionButton(CaptionGlyph.Minimize);
         var max = new CaptionButton(CaptionGlyph.Maximize);
         var close = new CaptionButton(CaptionGlyph.Close) { IsClose = true };
@@ -413,6 +437,12 @@ public sealed class CaptionButton : Control
 
     public bool IsClose { get; init; }
 
+    /// <summary>Текст вместо глифа — для компактных чипов (номера мониторов).</summary>
+    public string? Label { get; set; }
+
+    /// <summary>Подсветка выбранного чипа.</summary>
+    public bool Active { get; set; }
+
     public new event Action? Click;
 
     protected override void OnMouseEnter(EventArgs e)
@@ -460,21 +490,30 @@ public sealed class CaptionButton : Control
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-        if (_hover)
+        var radius = Label is null ? 6 : 5;
+
+        if (Active)
+        {
+            var selected = new Rectangle(1, 1, Width - 3, Height - 3);
+            using var selectedPath = Ui.RoundPath(selected, radius);
+            using var accent = new SolidBrush(Ui.Accent);
+            g.FillPath(accent, selectedPath);
+        }
+        else if (_hover)
         {
             var rect = new Rectangle(1, 1, Width - 3, Height - 3);
-            using var path = Ui.RoundPath(rect, 6);
+            using var path = Ui.RoundPath(rect, radius);
             using var brush = new SolidBrush(IsClose ? Ui.CloseRed : Ui.HoverOverlay);
             g.FillPath(brush, path);
         }
 
-        var color = !_hover ? Ui.Muted : _pressed ? Ui.Muted : Color.White;
+        var color = Active ? Color.White : !_hover ? Ui.Muted : _pressed ? Ui.Muted : Color.White;
+        var text = Label ?? Ui.Glyph(Glyph);
 
-        using var font = Ui.GlyphFont(8f);
-        var size = g.MeasureString(Ui.Glyph(Glyph), font);
+        using var font = Label is null ? Ui.GlyphFont(8f) : new Font("Segoe UI", 8.25f, FontStyle.Bold);
+        var size = g.MeasureString(text, font);
         using var textBrush = new SolidBrush(color);
-        g.DrawString(Ui.Glyph(Glyph), font, textBrush,
-            (Width - size.Width) / 2f, (Height - size.Height) / 2f);
+        g.DrawString(text, font, textBrush, (Width - size.Width) / 2f, (Height - size.Height) / 2f);
     }
 }
 

@@ -61,7 +61,7 @@ public sealed class SettingsDialog : ModernWindow
         Padding = new Padding(0, CaptionHeight, 0, 0);
 
         SetCaption("Настройки");
-        AddCaptionButtons();
+        AddCaptionButtons(closeOnly: true);
 
         typeof(Panel).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?
             .SetValue(_content, true);
@@ -123,6 +123,26 @@ public sealed class SettingsDialog : ModernWindow
         };
 
         _content.Controls.Add(_clearPasswordBtn);
+
+        // Сохранённые пароли других устройств — тоже личные данные, чистить надо уметь.
+        var forgetBtn = new UiButton("Забыть пароли")
+        {
+            Ghost = true,
+            Radius = 10,
+            Size = new Size(150, 34),
+            Location = new Point(x + 188, y),
+            Enabled = config.SavedCredentials.Count > 0,
+        };
+
+        forgetBtn.Click += (_, _) =>
+        {
+            _config.ForgetSavedSecrets();
+            _config.Save();
+            forgetBtn.Text = "сохранённые пароли удалены";
+            forgetBtn.Enabled = false;
+        };
+
+        _content.Controls.Add(forgetBtn);
         y += 34 + 6;
 
         y = AddField("ЗАХВАТ ЭКРАНА", _captureBtn, y) + 6;

@@ -249,7 +249,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg);
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config);
 }
 
 if (inputTestTarget is not null)
@@ -313,9 +313,9 @@ static void TryAttachParentConsole()
 static string PickFreeProfile() => ProfilePicker.Pick();
 
 static int RunViewer(
-    SignalingClient client, string targetId, VideoCodec codec, string? password, int? display = null)
+    SignalingClient client, string targetId, VideoCodec codec, string? password, int? display, AgentConfig config)
 {
-    var session = new ViewerSession(client, targetId, codec, password ?? string.Empty);
+    var session = new ViewerSession(client, targetId, codec, password ?? string.Empty, config);
     session.PreferredDisplay = display;
     var exitCode = 0;
 

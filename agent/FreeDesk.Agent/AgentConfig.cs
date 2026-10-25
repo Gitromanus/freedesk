@@ -35,6 +35,12 @@ public sealed class AgentConfig
     /// <summary>Монитор, с которого начинается трансляция (0 — основной).</summary>
     public int Display { get; set; }
 
+    /// <summary>
+    /// Сохранённые пароли устройств: по ID устройства лежит соль/итерации/хеш PBKDF2.
+    /// Сам пароль не хранится — только то, из чего нельзя восстановить пароль.
+    /// </summary>
+    public Dictionary<string, SavedCredential> SavedCredentials { get; set; } = new();
+
     /// <summary>Соль PBKDF2-хеша пароля unattended-доступа.</summary>
     public string? UnattendedSalt { get; set; }
 
@@ -83,6 +89,38 @@ public sealed class AgentConfig
             return null;
         }
     }
+
+    /// <summary>
+    /// Сохранённый хеш пароля для устройства — если соль та же, что в challenge.
+    /// Сменившуюся соль (пароль на хосте поменяли) считаем недействительной.
+    /// </summary>
+    public byte[]? TryGetSavedSecret(string targetId, string saltBase64)
+    {
+        if (!SavedCredentials.TryGetValue(targetId, out var saved) ||
+            !string.Equals(saved.Salt, saltBase64, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        try
+        {
+            return Convert.FromBase64String(saved.Hash);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    public void RememberSavedSecret(string targetId, string saltBase64, int iterations, byte[] hash) =>
+        SavedCredentials[targetId] = new SavedCredential
+        {
+            Salt = saltBase64,
+            Iterations = iterations,
+            Hash = Convert.ToBase64String(hash),
+        };
+
+    public void ForgetSavedSecrets() => SavedCredentials.Clear();
 
     /// <summary>Ширина кадра после масштабирования (0 — без масштабирования).</summary>
     public int MaxWidth { get; set; } = 1920;
@@ -136,4 +174,12 @@ public sealed class AgentConfig
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         PropertyNameCaseInsensitive = true,
     };
+}
+
+/// <summary>Сохранённый хеш пароля устройства (без самого пароля).</summary>
+public sealed class SavedCredential
+{
+    public string Salt { get; set; } = "";
+    public int Iterations { get; set; }
+    public string Hash { get; set; } = "";
 }
