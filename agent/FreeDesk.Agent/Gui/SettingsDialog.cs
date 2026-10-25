@@ -38,6 +38,9 @@ public sealed class SettingsDialog : ModernWindow
     private bool _clearPassword;
     private readonly string _originalServer;
 
+    private readonly Panel _content = new() { Dock = DockStyle.Fill, AutoScroll = true, BackColor = Ui.Card };
+    private readonly Panel _footer = new() { Dock = DockStyle.Bottom, Height = 72, BackColor = Ui.Card };
+
     public bool ServerChanged { get; private set; }
 
     public SettingsDialog(AgentConfig config)
@@ -47,7 +50,11 @@ public sealed class SettingsDialog : ModernWindow
 
         Text = "Настройки";
         Width = 480;
-        Height = 800;
+
+        // На ноутбуках 800 px по высоте не влезают: ограничиваем по рабочему столу,
+        // а содержимое делаем прокручиваемым.
+        var workingArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1024, 768);
+        Height = Math.Min(800, Math.Max(480, workingArea.Height - 60));
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         BackColor = Ui.Card;
@@ -56,12 +63,18 @@ public sealed class SettingsDialog : ModernWindow
         SetCaption("Настройки");
         AddCaptionButtons();
 
+        typeof(Panel).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?
+            .SetValue(_content, true);
+
+        Controls.Add(_content);
+        Controls.Add(_footer);
+
         _captureIndex = Math.Clamp(Array.IndexOf(CaptureModes, config.Capture), 0, 2);
         _codecIndex = Math.Clamp(Array.IndexOf(Codecs, VideoCodecNames.Parse(config.Codec).ToWire()), 0, 1);
 
         const int x = 24;
-        var w = Width - 48;
-        var y = CaptionHeight + 12;
+        var w = Width - 48 - SystemInformation.VerticalScrollBarWidth - 8;
+        var y = 12;
 
         y = AddField("ИМЯ УСТРОЙСТВА", _nameInput, y) + 6;
         _nameInput.InputText = config.Name;
@@ -109,7 +122,7 @@ public sealed class SettingsDialog : ModernWindow
             _clearPasswordBtn.Enabled = false;
         };
 
-        Controls.Add(_clearPasswordBtn);
+        _content.Controls.Add(_clearPasswordBtn);
         y += 34 + 6;
 
         y = AddField("ЗАХВАТ ЭКРАНА", _captureBtn, y) + 6;
@@ -123,9 +136,8 @@ public sealed class SettingsDialog : ModernWindow
 
         var save = new UiButton("Сохранить")
         {
-            Location = new Point(Width - 24 - 120, Height - 24 - 40),
             Size = new Size(120, 40),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            TabStop = false,
         };
         save.Click += (_, _) =>
         {
@@ -139,9 +151,8 @@ public sealed class SettingsDialog : ModernWindow
         var cancel = new UiButton("Отмена")
         {
             Ghost = true,
-            Location = new Point(Width - 24 - 120 - 8 - 120, Height - 24 - 40),
             Size = new Size(120, 40),
-            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+            TabStop = false,
         };
         cancel.Click += (_, _) =>
         {
@@ -173,12 +184,25 @@ public sealed class SettingsDialog : ModernWindow
             control.Location = new Point(x, top + 18);
             control.Size = new Size(w, 40);
 
-            Controls.AddRange(new Control[] { label, control });
+            _content.Controls.AddRange(new Control[] { label, control });
 
             return top + 18 + 44;
         }
 
-        Controls.AddRange(new Control[] { save, cancel });
+        _footer.Controls.AddRange(new Control[] { save, cancel });
+
+        // позиции считаем по фактической ширине: до показа панель ещё не разложена
+        _footer.Layout += (_, _) =>
+        {
+            cancel.Location = new Point(_footer.Width - 24 - 120 - 8 - 120, 16);
+            save.Location = new Point(_footer.Width - 24 - 120, 16);
+        };
+
+        _footer.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Ui.Line);
+            e.Graphics.DrawLine(pen, 0, 0, _footer.Width, 0);
+        };
     }
 
     private bool Apply()
