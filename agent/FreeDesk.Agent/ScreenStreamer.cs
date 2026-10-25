@@ -20,12 +20,20 @@ public sealed class ScreenStreamer : IAsyncDisposable
     /// <summary>Столько ошибок захвата подряд — переключаемся на GDI навсегда.</summary>
     private const int MaxConsecutiveErrors = 3;
 
+    /// <summary>Ниже этого битрейт не опускаем: картинка станет нечитаемой.</summary>
+    private const int MinBitrateKbps = 400;
+
     private readonly IPeerTransport _transport;
     private readonly string _captureMode;
     private readonly int _fps;
     private readonly long _quality;
     private readonly int _maxWidth;
     private readonly int _bitrateKbps;
+    private int _targetKbps;
+    private DateTime _lastRateChange = DateTime.MinValue;
+
+    /// <summary>Сколько кадров в секунду реально ушло в сеть за последнее окно (5 с).</summary>
+    private double _sentFps;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
     private IScreenCapture? _capture;
@@ -48,6 +56,7 @@ public sealed class ScreenStreamer : IAsyncDisposable
         _maxWidth = Math.Max(0, maxWidth);
         _captureMode = captureMode;
         _bitrateKbps = Math.Clamp(bitrateKbps, 200, 50_000);
+        _targetKbps = _bitrateKbps;
         _displayIndex = Math.Max(0, displayIndex);
     }
 
@@ -65,6 +74,61 @@ public sealed class ScreenStreamer : IAsyncDisposable
         if (index >= 0)
         {
             _requestedDisplay = index;
+        }
+    }
+
+    /// <summary>
+    /// Отчёт зрителя о приёме (раз в 5 с): подстраиваем битрейт под канал.
+    /// Снижаем, когда зритель явно не успевает и недобирает байты (сеть);
+    /// поднимаем, когда частота полная и поток реально грузит канал.
+    /// </summary>
+    public void ReportViewStats(double viewerFps, double viewerKbps)
+    {
+        if (_encoder is null || viewerFps <= 0)
+        {
+            return;
+        }
+
+        Log.Info($"зритель: {viewerFps:F1} fps, {viewerKbps:F0} кбит/с " +
+                 $"(отправлено {_sentFps:F1} fps, битрейт {_targetKbps} кбит/с)");
+
+        var now = DateTime.UtcNow;
+        if (now - _lastRateChange < TimeSpan.FromSeconds(3))
+        {
+            return;
+        }
+
+        // Сравниваем с тем, сколько мы реально отправили: на статичном экране
+        // энкодер отдаёт единичные кадры, и низкий fps зрителя — не потеря сети.
+        var sentFps = Math.Max(1.0, _sentFps);
+        var next = _targetKbps;
+
+        if (viewerFps < sentFps * 0.6 && viewerKbps < _targetKbps * 0.7)
+        {
+            next = Math.Max(MinBitrateKbps, (int)(_targetKbps * 0.75));
+        }
+        else if (viewerFps > sentFps * 0.85 && viewerKbps > _targetKbps * 0.5 && _targetKbps < _bitrateKbps)
+        {
+            next = Math.Min(_bitrateKbps, (int)(_targetKbps * 1.2));
+        }
+
+        if (next == _targetKbps)
+        {
+            return;
+        }
+
+        try
+        {
+            _encoder.SetBitrate(next);
+            Log.Info($"битрейт: {_targetKbps} → {next} кбит/с " +
+                     $"(зритель {viewerFps:F1} fps, {viewerKbps:F0} кбит/с)");
+
+            _targetKbps = next;
+            _lastRateChange = now;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"битрейт не изменён: {ex.Message}");
         }
     }
 
@@ -134,6 +198,8 @@ public sealed class ScreenStreamer : IAsyncDisposable
                         $"поток ({_transport.Codec.ToWire()}): {frames / seconds:F1} fps, " +
                         $"{perFrame} КБ/кадр, {bytes * 8 / seconds / 1_000_000:F1} Мбит/с" +
                         (skipped > 0 ? $", пропущено статичных: {skipped}" : ""));
+
+                    _sentFps = frames / seconds;
 
                     frames = 0;
                     skipped = 0;
@@ -225,7 +291,7 @@ public sealed class ScreenStreamer : IAsyncDisposable
             _encoder.Dispose();
         }
 
-        _encoder = new H264Encoder(targetWidth, targetHeight, _fps, _bitrateKbps);
+        _encoder = new H264Encoder(targetWidth, targetHeight, _fps, _targetKbps);
         _lastKeyframeAt = DateTime.UtcNow;
         return _encoder;
     }

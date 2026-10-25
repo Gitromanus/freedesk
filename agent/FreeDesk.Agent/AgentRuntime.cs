@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using FreeDesk.Agent.Files;
 using FreeDesk.Agent.Input;
 
 namespace FreeDesk.Agent;
@@ -366,7 +367,6 @@ public sealed class AgentRuntime
                 Log.Info($"канал установлен: {session.PeerName}");
                 return;
             }
-
             Log.Info($"канал установлен: {session.PeerName}");
             session.Streamer = new ScreenStreamer(
                 peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture, _config.BitrateKbps,
@@ -390,6 +390,23 @@ public sealed class AgentRuntime
             }
 
             HandleControl(session, json);
+        };
+
+        // Чанки файлов приходят бинарём: пишем на диск без разбора JSON.
+        peer.BinaryReceived += data =>
+        {
+            if (!FileWire.TryUnframe(data, out var transferId, out var chunk))
+            {
+                return;
+            }
+
+            var file = session.Files.Write(transferId, chunk);
+
+            if (file is not null)
+            {
+                Log.Info($"файл получен: {file.Path} ({file.Size / 1024} КБ)");
+                StatusChanged?.Invoke($"Получен файл: {file.Name}");
+            }
         };
 
         peer.Closed += reason =>
@@ -523,12 +540,66 @@ public sealed class AgentRuntime
                 session.Streamer?.SwitchDisplay(display);
                 return;
             }
+
+            // обратная связь по каналу: сколько зритель реально получает
+            if (root.TryGetProperty("t", out type) && type.GetString() == "stat")
+            {
+                var fps = root.TryGetProperty("fps", out var fpsValue) && fpsValue.TryGetDouble(out var f) ? f : 0;
+                var kbps = root.TryGetProperty("kbps", out var kbpsValue) && kbpsValue.TryGetDouble(out var k) ? k : 0;
+
+                session.Streamer?.ReportViewStats(fps, kbps);
+                return;
+            }
+
+            // файлообмен: предложение, завершение, отмена
+            if (root.TryGetProperty("t", out type) && type.GetString() == "file")
+            {
+                HandleFile(session, root);
+                return;
+            }
         }
         catch (JsonException)
         {
         }
 
         session.Injector.Handle(json);
+    }
+
+    /// <summary>Предложение файла: принимаем сразу (сессия уже подтверждена) и пишем в Downloads\FreeDesk.</summary>
+    private void HandleFile(ActiveSession session, JsonElement root)
+    {
+        var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
+        var id = root.TryGetProperty("id", out var idValue) && idValue.TryGetInt32(out var parsed) ? parsed : 0;
+
+        switch (op)
+        {
+            case "offer":
+                var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "file" : "file";
+                var size = root.TryGetProperty("size", out var sizeValue) && sizeValue.TryGetInt64(out var bytes) ? bytes : 0;
+
+                if (session.Files.TryStart(id, name, size, out var error))
+                {
+                    session.Transport?.SendControl(JsonSerializer.Serialize(new { t = "file", op = "accept", id }));
+                    Log.Info($"приём файла: {name} ({size / 1024} КБ)");
+                    StatusChanged?.Invoke($"Получение файла: {name}");
+                }
+                else
+                {
+                    session.Transport?.SendControl(JsonSerializer.Serialize(new { t = "file", op = "reject", id, reason = error }));
+                    Log.Warn($"файл отклонён: {error}");
+                }
+
+                break;
+
+            case "done":
+                Log.Info($"передача файла {id} завершена");
+                break;
+
+            case "cancel":
+                session.Files.Abort(id);
+                Log.Warn($"передача файла {id} отменена");
+                break;
+        }
     }
 
     /// <summary>Отправляет peer'у изменившийся локальный буфер обмена (раз в цикл).</summary>
@@ -567,6 +638,8 @@ public sealed class AgentRuntime
 
     private async Task CloseSessionAsync(ActiveSession session)
     {
+        session.Files.Dispose();
+
         if (session.Streamer is not null)
         {
             await session.Streamer.DisposeAsync();
@@ -603,5 +676,6 @@ public sealed class AgentRuntime
         public int EndedFlag;
         public InputInjector Injector { get; } = new();
         public ClipboardSync Clipboard { get; } = new();
+        public FileReceiver Files { get; } = new();
     }
 }

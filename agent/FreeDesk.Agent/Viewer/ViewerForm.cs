@@ -27,6 +27,7 @@ public sealed class ViewerForm : ModernWindow
     private readonly List<CaptionButton> _displayButtons = new();
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronUp) { Size = new Size(26, 24) };
     private readonly CaptionButton _powerBtn = new(CaptionGlyph.Power) { Size = new Size(26, 24) };
+    private readonly CaptionButton _fileBtn = new(CaptionGlyph.File) { Size = new Size(26, 24) };
     private readonly CaptionButton _expandBtn = new(CaptionGlyph.ChevronDown) { Size = new Size(28, 22) };
 
     private readonly Label _toast = new();
@@ -127,7 +128,11 @@ public sealed class ViewerForm : ModernWindow
         _powerBtn.TabStop = false;
         _powerBtn.Click += RequestDisconnect;
 
-        // порядок: [мониторы…] [отключиться] [свернуть] — сворачивание всегда крайнее справа
+        _fileBtn.TabStop = false;
+        _fileBtn.Click += PickAndSendFile;
+
+        // порядок: [мониторы…] [файл] [отключиться] [свернуть]
+        _bar.Controls.Add(_fileBtn);
         _bar.Controls.Add(_powerBtn);
         _bar.Controls.Add(_collapseBtn);
 
@@ -201,6 +206,9 @@ public sealed class ViewerForm : ModernWindow
         {
             x += 4;
         }
+
+        _fileBtn.Location = new Point(x, 5);
+        x += _fileBtn.Width + 2;
 
         _powerBtn.Location = new Point(x, 5);
         x += _powerBtn.Width + 2;
@@ -368,10 +376,28 @@ public sealed class ViewerForm : ModernWindow
         _dirty = true;
     }
 
+    /// <summary>Выбрать файл и отправить его на удалённую машину.</summary>
+    private void PickAndSendFile()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Передать файл",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        _ = _session.SendFileAsync(dialog.FileName);
+        _canvas.Focus();
+    }
+
     private void RequestDisconnect()
     {
-        if (DisconnectRequested is { } handler)
-        {
+        if (DisconnectRequested is { } handler)        {
             handler();
             return;
         }

@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Text.Json;
 using FreeDesk.Agent.Codec;
+using FreeDesk.Agent.Files;
 
 namespace FreeDesk.Agent;
 
@@ -20,6 +21,8 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly AgentConfig? _config;
     private string? _password;
     private (string Salt, int Iterations, byte[] Hash)? _pendingCredential;
+    private int _fileCounter;
+    private readonly Dictionary<int, TaskCompletionSource<bool>> _fileOffers = new();
     private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
@@ -145,9 +148,23 @@ public sealed class ViewerSession : IAsyncDisposable
 
             if (_rxWatch.Elapsed.TotalSeconds >= 5)
             {
+                var seconds = Math.Max(0.1, _rxWatch.Elapsed.TotalSeconds);
+                var fps = Math.Round(_frameCount / seconds, 1);
+                var kbps = Math.Round(_rxBytes * 8 / 1000.0 / seconds);
+
                 Log.Info(
                     $"приём: {_frameCount} кадров, {_rxBytes / 1024.0 / 1024.0:F2} МБ за " +
                     $"{_rxWatch.Elapsed.TotalSeconds:F0} с ({_frameCount / _rxWatch.Elapsed.TotalSeconds:F1} fps)");
+
+                // Обратная связь по каналу: хост подстроит битрейт под реальный приём.
+                try
+                {
+                    _peer?.SendControl(JsonSerializer.Serialize(new { t = "stat", fps, kbps }));
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"статистика не отправлена: {ex.Message}");
+                }
 
                 _frameCount = 0;
                 _rxBytes = 0;
@@ -184,6 +201,10 @@ public sealed class ViewerSession : IAsyncDisposable
 
                     case "displays":
                         HandleDisplays(root);
+                        break;
+
+                    case "file":
+                        HandleFileControl(root);
                         break;
                 }
             }
@@ -260,6 +281,131 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             Log.Warn($"не удалось переключить монитор: {ex.Message}");
         }
+    }
+
+    /// <summary>Отправить файл на удалённую машину через data channel.</summary>
+    public async Task SendFileAsync(string path, CancellationToken ct = default)
+    {
+        var peer = _peer;
+
+        if (peer is null || !peer.IsConnected)
+        {
+            StatusChanged?.Invoke("нет соединения");
+            return;
+        }
+
+        var info = new FileInfo(path);
+
+        if (!info.Exists)
+        {
+            StatusChanged?.Invoke("файл не найден");
+            return;
+        }
+
+        if (info.Length <= 0 || info.Length > FileWire.MaxFileBytes)
+        {
+            StatusChanged?.Invoke("файл слишком большой (макс. 2 ГБ)");
+            return;
+        }
+
+        var id = Interlocked.Increment(ref _fileCounter);
+        var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _fileOffers[id] = accepted;
+
+        try
+        {
+            peer.SendControl(JsonSerializer.Serialize(new
+            {
+                t = "file",
+                op = "offer",
+                id,
+                name = info.Name,
+                size = info.Length,
+            }));
+
+            StatusChanged?.Invoke($"ждём подтверждения: {info.Name}");
+
+            bool ok;
+
+            try
+            {
+                ok = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+            }
+            catch (TimeoutException)
+            {
+                StatusChanged?.Invoke($"{info.Name}: удалённая сторона не ответила");
+                return;
+            }
+
+            if (!ok)
+            {
+                StatusChanged?.Invoke($"{info.Name}: передача отклонена");
+                return;
+            }
+
+            await using var stream = File.OpenRead(path);
+            var buffer = new byte[FileWire.ChunkSize];
+            var lastReport = DateTime.UtcNow;
+            long sent = 0;
+
+            while (sent < info.Length)
+            {
+                var read = await stream.ReadAsync(buffer.AsMemory(0, FileWire.ChunkSize), ct);
+
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                peer.SendBinary(FileWire.Frame(id, buffer.AsSpan(0, read)));
+                sent += read;
+
+                if (DateTime.UtcNow - lastReport > TimeSpan.FromMilliseconds(700))
+                {
+                    StatusChanged?.Invoke($"отправка {info.Name}: {sent * 100 / info.Length}%");
+                    lastReport = DateTime.UtcNow;
+                }
+
+                // не забиваем очередь SCTP: ждём, пока она рассосётся
+                while (peer.BufferedBytes > 1_000_000)
+                {
+                    await Task.Delay(20, ct);
+                }
+            }
+
+            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "done", id }));
+
+            Log.Info($"файл отправлен: {info.Name} ({sent / 1024} КБ)");
+            StatusChanged?.Invoke($"файл отправлен: {info.Name}");
+        }
+        catch (OperationCanceledException)
+        {
+            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
+            StatusChanged?.Invoke("передача отменена");
+        }
+        catch (Exception ex)
+        {
+            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
+            Log.Error($"файл не отправлен: {ex.Message}");
+            StatusChanged?.Invoke("ошибка передачи: " + ex.Message);
+        }
+        finally
+        {
+            _fileOffers.Remove(id);
+        }
+    }
+
+    private void HandleFileControl(JsonElement root)
+    {
+        var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
+        var id = root.TryGetProperty("id", out var idValue) && idValue.TryGetInt32(out var parsed) ? parsed : 0;
+
+        if (op is not ("accept" or "reject") || !_fileOffers.TryGetValue(id, out var pending))
+        {
+            return;
+        }
+
+        pending.TrySetResult(op == "accept");
     }
 
     /// <summary>Пришёл кадр от хоста: JPEG или H.264 access unit.</summary>

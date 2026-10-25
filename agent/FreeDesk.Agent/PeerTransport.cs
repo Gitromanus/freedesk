@@ -19,6 +19,9 @@ public interface IPeerTransport : IAsyncDisposable
     /// <summary>Готовый кадр от удалённой стороны: JPEG или H.264 access unit.</summary>
     event Action<byte[]>? FrameReceived;
 
+    /// <summary>Бинарное сообщение data channel (файлы, чанки).</summary>
+    event Action<byte[]>? BinaryReceived;
+
     /// <summary>Сообщение управления (ввод) от удалённой стороны.</summary>
     event Action<string>? ControlReceived;
 
@@ -35,6 +38,9 @@ public interface IPeerTransport : IAsyncDisposable
 
     /// <summary>Отправить кадр: JPEG как MJPEG/RTP или H.264 access unit (Annex B).</summary>
     void SendFrame(byte[] frame, uint durationRtpUnits);
+
+    /// <summary>Отправить бинарный блок (чанк файла).</summary>
+    void SendBinary(byte[] data);
 
     void SendControl(string json);
 
@@ -66,6 +72,7 @@ public sealed class WebRtcPeer : IPeerTransport
 
     public event Action<object>? LocalSignal;
     public event Action<byte[]>? FrameReceived;
+    public event Action<byte[]>? BinaryReceived;
     public event Action<string>? ControlReceived;
     public event Action? Connected;
     public event Action<string>? Closed;
@@ -159,6 +166,10 @@ public sealed class WebRtcPeer : IPeerTransport
             if (protocol == DataChannelPayloadProtocols.WebRTC_String)
             {
                 ControlReceived?.Invoke(Encoding.UTF8.GetString(data));
+            }
+            else
+            {
+                BinaryReceived?.Invoke(data);
             }
         };
 
@@ -300,6 +311,15 @@ public sealed class WebRtcPeer : IPeerTransport
         if (channel is not null && channel.readyState == RTCDataChannelState.open)
         {
             channel.send(json);
+        }
+    }
+
+    public void SendBinary(byte[] data)
+    {
+        var channel = _channel;
+        if (channel is not null && channel.readyState == RTCDataChannelState.open)
+        {
+            channel.send(data);
         }
     }
 

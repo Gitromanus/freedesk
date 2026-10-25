@@ -19,12 +19,15 @@ public sealed unsafe class H264Encoder : IDisposable
     private const int SlotUninitialize = 3;
     private const int SlotEncodeFrame = 4;
     private const int SlotForceIntra = 6;
+    private const int SlotSetOption = 7;
 
     private const int UsageScreenContentRealTime = 1; // EUsageType
     private const int RcBitrateMode = 1;              // RC_MODES
     private const int VideoFormatI420 = 23;           // EVideoFormatType
     private const int FrameTypeIdr = 1;               // EVideoFrameType
     private const int FrameTypeSkip = 4;              // EVideoFrameType
+    private const int EncoderOptionBitrate = 5;       // ENCODER_OPTION
+    private const int SpatialLayerAll = 4;            // SPATIAL_LAYER_ALL
 
     /// <summary>MAX_LAYER_NUM_OF_FRAME из codec_app_def.h.</summary>
     private const int MaxLayers = 128;
@@ -196,6 +199,23 @@ public sealed unsafe class H264Encoder : IDisposable
     public void ForceKeyframe() =>
         GetDelegate<Delegate_ForceIntra>(SlotForceIntra)(_encoder, 1, -1);
 
+    /// <summary>
+    /// Меняет целевой битрейт на лету (адаптация под канал).
+    /// OpenH264 принимает SBitrateInfo с iLayer = SPATIAL_LAYER_ALL.
+    /// </summary>
+    public void SetBitrate(int kbps)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var info = new SBitrateInfo { Layer = SpatialLayerAll, Bitrate = Math.Max(100, kbps) * 1000 };
+        var hr = GetDelegate<Delegate_SetOption>(SlotSetOption)(_encoder, EncoderOptionBitrate, ref info);
+
+        if (hr != 0)
+        {
+            throw new InvalidOperationException($"openh264: SetOption(BITRATE) failed ({hr})");
+        }
+    }
+
     /// <summary>Есть ли в access unit IDR-слайс (nal_unit_type 5).</summary>
     private static bool ContainsIdr(ReadOnlySpan<byte> annexB)
     {
@@ -297,6 +317,16 @@ public sealed unsafe class H264Encoder : IDisposable
 
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int Delegate_ForceIntra(IntPtr self, int idr, int layerId);
+
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int Delegate_SetOption(IntPtr self, int option, ref SBitrateInfo info);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SBitrateInfo
+    {
+        public int Layer;
+        public int Bitrate;
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct SEncParamBase

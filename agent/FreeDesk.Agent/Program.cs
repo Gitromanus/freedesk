@@ -57,6 +57,7 @@ var startHidden = false;
 var installAutostart = false;
 var removeAutostart = false;
 int? displayArg = null;
+string? sendFile = null;
 var captureTestFrames = 0;
 long captureQuality = 70;
 var captureCodec = "mjpeg";
@@ -105,6 +106,9 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--password" when i + 1 < args.Length:
             viewPassword = args[++i];
+            break;
+        case "--send-file" when i + 1 < args.Length:
+            sendFile = args[++i];
             break;
         case "--set-password" when i + 1 < args.Length:
             newPassword = args[++i];
@@ -164,6 +168,7 @@ for (var i = 0; i < args.Length; i++)
                   --view <id>          открыть окно просмотра удалённого экрана
                   --input-test <id>    проверить передачу ввода без окна
                   --password <пароль>  пароль устройства для подключения без подтверждения
+                  --send-file <путь>   после подключения отправить файл на удалённую машину
                   --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти
                   --clear-password     удалить сохранённый пароль профиля и выйти
                   --profile <имя>      отдельный профиль (несколько агентов на машине)
@@ -281,7 +286,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config);
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config, sendFile);
 }
 
 if (inputTestTarget is not null)
@@ -345,10 +350,16 @@ static void TryAttachParentConsole()
 static string PickFreeProfile() => ProfilePicker.Pick();
 
 static int RunViewer(
-    SignalingClient client, string targetId, VideoCodec codec, string? password, int? display, AgentConfig config)
+    SignalingClient client, string targetId, VideoCodec codec, string? password, int? display,
+    AgentConfig config, string? sendFile = null)
 {
     var session = new ViewerSession(client, targetId, codec, password ?? string.Empty, config);
     session.PreferredDisplay = display;
+
+    if (sendFile is not null)
+    {
+        session.Connected += () => _ = session.SendFileAsync(sendFile);
+    }
     var exitCode = 0;
 
     // WinForms требует STA — создаём отдельный поток, чтобы не зависеть от

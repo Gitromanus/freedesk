@@ -98,6 +98,7 @@ public static class Ui
                 CaptionGlyph.Settings => "\uE713",
                 CaptionGlyph.Monitor => "\uE7F4",
                 CaptionGlyph.Power => "\uE7E8",
+                CaptionGlyph.File => "\uE898",
                 _ => "?",
             };
         }
@@ -117,6 +118,7 @@ public static class Ui
             CaptionGlyph.Settings => "\u2699",
             CaptionGlyph.Monitor => "\u25A3",
             CaptionGlyph.Power => "\u23FB",
+            CaptionGlyph.File => "\u2191",
             _ => "?",
         };
     }
@@ -140,6 +142,7 @@ public enum CaptionGlyph
     Settings,
     Monitor,
     Power,
+    File,
 }
 
 /// <summary>Панель с двойной буферизацией: без мерцания при перерисовке.</summary>
