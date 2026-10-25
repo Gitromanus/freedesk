@@ -17,6 +17,8 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiInput _qualityInput = new("80");
     private readonly UiInput _bitrateInput = new("3000");
     private readonly UiInput _widthInput = new("1920");
+    private readonly UiInput _passwordInput = new("не задан");
+    private readonly UiButton _clearPasswordBtn = new("Сбросить пароль") { Ghost = true, Radius = 10 };
     private readonly UiButton _codecBtn = new("H.264 (openh264)") { Ghost = true, Radius = 10 };
     private readonly UiButton _captureBtn = new("Авто (DXGI → GDI)") { Ghost = true, Radius = 10 };
 
@@ -33,6 +35,7 @@ public sealed class SettingsDialog : ModernWindow
 
     private int _captureIndex;
     private int _codecIndex;
+    private bool _clearPassword;
     private readonly string _originalServer;
 
     public bool ServerChanged { get; private set; }
@@ -44,7 +47,7 @@ public sealed class SettingsDialog : ModernWindow
 
         Text = "Настройки";
         Width = 480;
-        Height = 640;
+        Height = 800;
         StartPosition = FormStartPosition.CenterParent;
         ShowInTaskbar = false;
         BackColor = Ui.Card;
@@ -86,6 +89,28 @@ public sealed class SettingsDialog : ModernWindow
 
         y = AddField("МАКС. ШИРИНА КАДРА, PX (0 — БЕЗ МАСШТАБИРОВАНИЯ)", _widthInput, y) + 6;
         _widthInput.InputText = config.MaxWidth.ToString();
+
+        // Пароль храним только хешем: показать текущий нельзя, только задать новый.
+        _passwordInput.Box.UseSystemPasswordChar = true;
+        _passwordInput.Box.PlaceholderText = config.HasUnattendedPassword
+            ? "задан — введите новый, чтобы сменить"
+            : "не задан — подключение по подтверждению";
+
+        y = AddField("ПАРОЛЬ ДЛЯ ДОСТУПА БЕЗ ПОДТВЕРЖДЕНИЯ", _passwordInput, y) + 2;
+
+        _clearPasswordBtn.Location = new Point(x, y);
+        _clearPasswordBtn.Size = new Size(180, 34);
+        _clearPasswordBtn.Enabled = config.HasUnattendedPassword;
+        _clearPasswordBtn.Click += (_, _) =>
+        {
+            _clearPassword = true;
+            _passwordInput.InputText = "";
+            _clearPasswordBtn.Text = "пароль будет сброшен";
+            _clearPasswordBtn.Enabled = false;
+        };
+
+        Controls.Add(_clearPasswordBtn);
+        y += 34 + 6;
 
         y = AddField("ЗАХВАТ ЭКРАНА", _captureBtn, y) + 6;
         _captureBtn.Height = 40;
@@ -178,6 +203,13 @@ public sealed class SettingsDialog : ModernWindow
         if (!TryParseRange(_bitrateInput.InputText, 200, 50000, out var bitrate, "битрейт H.264")) return false;
         if (!TryParseRange(_widthInput.InputText, 0, 7680, out var width, "ширина кадра")) return false;
 
+        var newPassword = _passwordInput.InputText;
+        if (!_clearPassword && newPassword.Length is > 0 and < 6)
+        {
+            Flash("пароль: не короче 6 символов (или оставьте поле пустым)");
+            return false;
+        }
+
         _config.Name = name;
         _config.Server = server;
         _config.Fps = fps;
@@ -185,6 +217,15 @@ public sealed class SettingsDialog : ModernWindow
         _config.BitrateKbps = bitrate;
         _config.Codec = Codecs[_codecIndex];
         _config.MaxWidth = width;
+
+        if (_clearPassword)
+        {
+            _config.ClearUnattendedPassword();
+        }
+        else if (newPassword.Length > 0)
+        {
+            _config.SetUnattendedPassword(newPassword);
+        }
         _config.Capture = CaptureModes[_captureIndex];
         _config.Save();
 

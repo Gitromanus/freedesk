@@ -35,9 +35,12 @@ public sealed class ScreenStreamer : IAsyncDisposable
     private DateTime _lastKeyframeAt = DateTime.MinValue;
     private int _consecutiveErrors;
     private string? _effectiveMode;
+    private int _displayIndex;
+    private int _requestedDisplay = -1;
 
     public ScreenStreamer(
-        IPeerTransport transport, int fps, long quality, int maxWidth, string captureMode = "auto", int bitrateKbps = 3000)
+        IPeerTransport transport, int fps, long quality, int maxWidth, string captureMode = "auto",
+        int bitrateKbps = 3000, int displayIndex = 0)
     {
         _transport = transport;
         _fps = Math.Clamp(fps, 1, 60);
@@ -45,11 +48,24 @@ public sealed class ScreenStreamer : IAsyncDisposable
         _maxWidth = Math.Max(0, maxWidth);
         _captureMode = captureMode;
         _bitrateKbps = Math.Clamp(bitrateKbps, 200, 50_000);
+        _displayIndex = Math.Max(0, displayIndex);
     }
 
     public void Start()
     {
         _loop = Task.Run(LoopAsync);
+    }
+
+    /// <summary>
+    /// Переключить монитор (команда зрителя). Применяется в цикле перед захватом,
+    /// чтобы не спорить с потоком за GDI/DXGI-ресурсы.
+    /// </summary>
+    public void SwitchDisplay(int index)
+    {
+        if (index >= 0)
+        {
+            _requestedDisplay = index;
+        }
     }
 
     /// <summary>Зритель не смог декодировать кадр — просим энкодер выдать IDR.</summary>
@@ -69,15 +85,17 @@ public sealed class ScreenStreamer : IAsyncDisposable
     {
         try
         {
-            _capture = CreateCapture(_captureMode);
-            _effectiveMode = _captureMode;
-            Log.Info($"захват: {_capture.GetType().Name} {_capture.Width}x{_capture.Height}, кодек {_transport.Codec.ToWire()}");
+            _capture = CreateCapture(_effectiveMode ?? _captureMode);
+            Log.Info($"захват: {_capture.GetType().Name} {_capture.Width}x{_capture.Height} " +
+                     $"(монитор #{_displayIndex}), кодек {_transport.Codec.ToWire()}");
 
             if (_transport.Codec == VideoCodec.H264)
             {
                 // создаём сразу: если openh264.dll нет, узнаем об этом в логе, а не в тишине
                 EnsureEncoder(_capture.Width, _capture.Height);
             }
+
+            SendDisplays();
 
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(1000.0 / _fps));
             var stopwatch = Stopwatch.StartNew();
@@ -89,7 +107,9 @@ public sealed class ScreenStreamer : IAsyncDisposable
             {
                 try
                 {
-                    var frame = _capture.CaptureFrame(out var stride);
+                    ApplyDisplaySwitch();
+
+                    var frame = _capture!.CaptureFrame(out var stride);
 
                     if (_encoder is null)
                     {
@@ -236,18 +256,71 @@ public sealed class ScreenStreamer : IAsyncDisposable
         frame.CopyTo(_lastFrame);
     }
 
-    private IScreenCapture CreateCapture(string mode)
+    /// <summary>Список мониторов и активный — зрителю для кнопок переключения.</summary>
+    private void SendDisplays()
     {
+        var items = Displays.All()
+            .Select(d => new { i = d.Index, w = d.Width, h = d.Height, p = d.Primary })
+            .ToArray();
+
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            t = "displays",
+            items,
+            active = _displayIndex,
+        });
+
+        _transport.SendControl(json);
+    }
+
+    /// <summary>Пересоздаёт захват под запрошенный монитор (вызывается только из цикла).</summary>
+    private void ApplyDisplaySwitch()
+    {
+        var requested = _requestedDisplay;
+        if (requested < 0 || requested == _displayIndex)
+        {
+            return;
+        }
+
+        _requestedDisplay = -1;
+
+        var display = Displays.ByIndex(requested);
+        Log.Info($"переключение на монитор #{display.Index}: {display.Width}x{display.Height} @ {display.X},{display.Y}");
+
         try
         {
-            return CaptureFactory.Create(mode);
+            _capture?.Dispose();
+        }
+        catch
+        {
+        }
+
+        _displayIndex = display.Index;
+        _lastFrame = null;
+        _consecutiveErrors = 0;
+        _capture = CreateCapture(_effectiveMode ?? _captureMode);
+
+        // кадр сменился целиком — зрителю нужен ключевой
+        _lastKeyframeAt = DateTime.UtcNow;
+        _encoder?.ForceKeyframe();
+
+        SendDisplays();
+    }
+
+    private IScreenCapture CreateCapture(string mode)
+    {
+        var display = Displays.ByIndex(_displayIndex);
+
+        try
+        {
+            return CaptureFactory.Create(mode, display);
         }
         catch (Exception ex)
         {
             // Даже явно выбранный режим не должен убивать поток: откатываемся на GDI.
             Log.Warn($"{ex.Message}, откатываюсь на gdi");
             _effectiveMode = "gdi";
-            return CaptureFactory.Create("gdi");
+            return CaptureFactory.Create("gdi", display);
         }
     }
 

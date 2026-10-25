@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace FreeDesk.Agent;
 
@@ -30,6 +31,58 @@ public sealed class AgentConfig
 
     /// <summary>Целевой битрейт H.264, кбит/с.</summary>
     public int BitrateKbps { get; set; } = 3000;
+
+    /// <summary>Монитор, с которого начинается трансляция (0 — основной).</summary>
+    public int Display { get; set; }
+
+    /// <summary>Соль PBKDF2-хеша пароля unattended-доступа.</summary>
+    public string? UnattendedSalt { get; set; }
+
+    /// <summary>Число итераций PBKDF2 для сохранённого пароля.</summary>
+    public int UnattendedIterations { get; set; } = UnattendedAuth.DefaultIterations;
+
+    /// <summary>Хеш пароля unattended-доступа (сам пароль не хранится).</summary>
+    public string? UnattendedHash { get; set; }
+
+    [JsonIgnore]
+    public bool HasUnattendedPassword =>
+        !string.IsNullOrEmpty(UnattendedHash) && !string.IsNullOrEmpty(UnattendedSalt);
+
+    /// <summary>Сохраняет пароль в виде соль+итерации+хеш.</summary>
+    public void SetUnattendedPassword(string password)
+    {
+        var secret = UnattendedAuth.Create(password);
+        UnattendedSalt = Convert.ToBase64String(secret.Salt);
+        UnattendedIterations = secret.Iterations;
+        UnattendedHash = Convert.ToBase64String(secret.Hash);
+    }
+
+    public void ClearUnattendedPassword()
+    {
+        UnattendedSalt = null;
+        UnattendedHash = null;
+    }
+
+    /// <summary>Секрет для проверки challenge; null — пароль не задан.</summary>
+    public UnattendedAuth.Secret? GetUnattendedSecret()
+    {
+        if (!HasUnattendedPassword)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new UnattendedAuth.Secret(
+                Convert.FromBase64String(UnattendedSalt!),
+                Math.Clamp(UnattendedIterations, UnattendedAuth.MinIterations, UnattendedAuth.MaxIterations),
+                Convert.FromBase64String(UnattendedHash!));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>Ширина кадра после масштабирования (0 — без масштабирования).</summary>
     public int MaxWidth { get; set; } = 1920;

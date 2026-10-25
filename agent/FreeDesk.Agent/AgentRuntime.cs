@@ -14,6 +14,7 @@ public sealed class AgentRuntime
     private readonly SignalingClient _client;
     private readonly ConcurrentDictionary<string, ActiveSession> _sessions = new();
     private readonly Dictionary<string, IncomingItem> _pending = new();
+    private readonly Dictionary<string, PendingAuth> _auth = new();
     private DateTime _lastPresence = DateTime.MinValue;
     private readonly HashSet<string> _prompted = new();
 
@@ -48,6 +49,7 @@ public sealed class AgentRuntime
             {
                 await PresenceIfDueAsync(ct);
                 await HandleIncomingAsync(ct);
+                await HandleAuthAsync(ct);
                 await HandleKeyPressesAsync(ct);
                 await PollSessionsAsync(ct);
                 SyncClipboards();
@@ -118,8 +120,18 @@ public sealed class AgentRuntime
         {
             seen.Add(item.SessionId);
 
-            if (_sessions.ContainsKey(item.SessionId) || _pending.ContainsKey(item.SessionId))
+            if (_sessions.ContainsKey(item.SessionId) || _pending.ContainsKey(item.SessionId) ||
+                _auth.ContainsKey(item.SessionId))
             {
+                continue;
+            }
+
+            // Пароль устройства важнее и автоприёма, и подтверждения человеком:
+            // спрашиваем не «разрешить?», а proof от challenge. Битый хеш в конфиге
+            // (нет соли и т.п.) — не повод зависнуть: тогда работает обычный путь.
+            if (_config.GetUnattendedSecret() is { } secret)
+            {
+                await SendChallengeAsync(item, secret, ct);
                 continue;
             }
 
@@ -160,6 +172,122 @@ public sealed class AgentRuntime
         foreach (var stale in _pending.Keys.Where(id => !seen.Contains(id)).ToList())
         {
             _pending.Remove(stale);
+        }
+
+        foreach (var stale in _auth.Keys.Where(id => !seen.Contains(id)).ToList())
+        {
+            _auth.Remove(stale);
+        }
+    }
+
+    /// <summary>Отправляет зрителю challenge: nonce + параметры PBKDF2.</summary>
+    private async Task SendChallengeAsync(IncomingItem item, UnattendedAuth.Secret secret, CancellationToken ct)
+    {
+        var auth = new PendingAuth
+        {
+            Item = item,
+            Nonce = UnattendedAuth.NewNonce(),
+            ExpiresAt = DateTime.UtcNow.AddSeconds(60),
+        };
+
+        _auth[item.SessionId] = auth;
+        await SendChallengeMessageAsync(item.SessionId, auth, secret, ct);
+
+        Log.Info($"запрос пароля устройства: {item.From.Name} ({item.From.PublicId})");
+    }
+
+    private async Task SendChallengeMessageAsync(
+        string sessionId, PendingAuth auth, UnattendedAuth.Secret secret, CancellationToken ct)
+    {
+        await _client.SignalAsync(sessionId, "challenge", new Dictionary<string, object?>
+        {
+            ["v"] = 1,
+            ["nonce"] = auth.Nonce,
+            ["salt"] = Convert.ToBase64String(secret.Salt),
+            ["iterations"] = secret.Iterations,
+        }, ct);
+    }
+
+    /// <summary>Ждёт ответ на challenge; проверяет proof и принимает сессию сама.</summary>
+    private async Task HandleAuthAsync(CancellationToken ct)
+    {
+        foreach (var (sessionId, auth) in _auth.ToList())
+        {
+            if (DateTime.UtcNow > auth.ExpiresAt)
+            {
+                _auth.Remove(sessionId);
+                Log.Warn($"пароль не введён за минуту: {auth.Item.From.Name}");
+                await TryAnswerAsync(sessionId, "reject", ct);
+                continue;
+            }
+
+            var poll = await _client.PollAsync(sessionId, auth.Cursor, ct);
+            auth.Cursor = poll.Cursor;
+
+            if (poll.Session.State == "ended")
+            {
+                _auth.Remove(sessionId);
+                continue;
+            }
+
+            foreach (var message in poll.Messages)
+            {
+                if (message.Type != "auth")
+                {
+                    continue;
+                }
+
+                var proof = message.Payload.ValueKind == JsonValueKind.Object &&
+                            message.Payload.TryGetProperty("proof", out var value)
+                    ? value.GetString()
+                    : null;
+
+                var secret = _config.GetUnattendedSecret();
+                var accepted = secret is not null && proof is not null &&
+                               UnattendedAuth.Verify(secret, auth.Nonce, proof);
+
+                if (accepted)
+                {
+                    _auth.Remove(sessionId);
+                    Log.Info($"пароль принят: {auth.Item.From.Name} ({auth.Item.From.PublicId})");
+                    await AcceptAsync(auth.Item, ct);
+                    break;
+                }
+
+                auth.Attempts++;
+                Log.Warn($"неверный пароль ({auth.Attempts}/3): {auth.Item.From.Name}");
+
+                if (auth.Attempts >= 3)
+                {
+                    _auth.Remove(sessionId);
+                    await TryAnswerAsync(sessionId, "reject", ct);
+                    break;
+                }
+
+                // даём ещё попытку: новый nonce, чтобы старый proof не переиспользовали
+                auth.Nonce = UnattendedAuth.NewNonce();
+                auth.ExpiresAt = DateTime.UtcNow.AddSeconds(60);
+
+                await _client.SignalAsync(sessionId, "auth_failed", new { attempts = auth.Attempts }, ct);
+
+                if (_config.GetUnattendedSecret() is { } nextSecret)
+                {
+                    await SendChallengeMessageAsync(sessionId, auth, nextSecret, ct);
+                }
+            }
+        }
+    }
+
+    /// <summary>Ответ на заявку, когда сессия могла уже закрыться на сервере.</summary>
+    private async Task TryAnswerAsync(string sessionId, string action, CancellationToken ct)
+    {
+        try
+        {
+            await _client.AnswerAsync(sessionId, action, ct);
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            Log.Warn($"сессия {sessionId}: {action} не отправлен ({ex.Message})");
         }
     }
 
@@ -241,7 +369,8 @@ public sealed class AgentRuntime
 
             Log.Info($"канал установлен: {session.PeerName}");
             session.Streamer = new ScreenStreamer(
-                peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture, _config.BitrateKbps);
+                peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture, _config.BitrateKbps,
+                _config.Display);
             session.Streamer.Start();
             StatusChanged?.Invoke($"Подключено: {session.PeerName}");
             SessionStarted?.Invoke();
@@ -354,6 +483,12 @@ public sealed class AgentRuntime
                 Log.Info($"peer попрощался: {session.PeerName}");
                 break;
 
+            case "auth":
+            case "challenge":
+            case "auth_failed":
+                // обработаны в HandleAuthAsync ещё до принятия заявки
+                break;
+
             default:
                 Log.Warn($"неизвестный тип сигнала: {message.Type}");
                 break;
@@ -377,6 +512,15 @@ public sealed class AgentRuntime
             if (root.TryGetProperty("t", out type) && type.GetString() == "kf")
             {
                 session.Streamer?.RequestKeyframe();
+                return;
+            }
+
+            // зритель выбрал другой монитор
+            if (root.TryGetProperty("t", out type) && type.GetString() == "mon" &&
+                root.TryGetProperty("i", out var displayIndex) && displayIndex.TryGetInt32(out var display))
+            {
+                Log.Info($"зритель переключает монитор: #{display}");
+                session.Streamer?.SwitchDisplay(display);
                 return;
             }
         }
@@ -434,6 +578,15 @@ public sealed class AgentRuntime
             await session.Transport.DisposeAsync();
             session.Transport = null;
         }
+    }
+
+    private sealed class PendingAuth
+    {
+        public required IncomingItem Item { get; init; }
+        public required string Nonce { get; set; }
+        public required DateTime ExpiresAt { get; set; }
+        public long Cursor { get; set; }
+        public int Attempts { get; set; }
     }
 
     private sealed class ActiveSession

@@ -12,7 +12,7 @@ public sealed class PromptDialog : ModernWindow
     private readonly UiInput _input;
     private DialogResult _result = DialogResult.Cancel;
 
-    internal PromptDialog(string title, string message, string value, bool confirmMode)
+    internal PromptDialog(string title, string message, string value, bool confirmMode, bool secretMode = false)
     {
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.CenterParent;
@@ -47,6 +47,11 @@ public sealed class PromptDialog : ModernWindow
         if (!confirmMode)
         {
             _input.InputText = value;
+        }
+
+        if (secretMode)
+        {
+            _input.Box.UseSystemPasswordChar = true;
         }
 
         var accept = new UiButton(confirmMode ? "Разрешить" : "Сохранить")
@@ -124,6 +129,31 @@ public sealed class PromptDialog : ModernWindow
                     "", confirmMode: true);
 
                 source.SetResult(dialog.ShowDialog(owner) == DialogResult.OK);
+            }
+            catch (Exception ex)
+            {
+                source.SetException(ex);
+            }
+        });
+
+        return source.Task;
+    }
+
+    /// <summary>Спросить пароль устройства (unattended-доступ). null — пользователь отказался.</summary>
+    public static Task<string?> AskPasswordAsync(Form owner, string peerName)
+    {
+        var source = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        owner.BeginInvoke(() =>
+        {
+            try
+            {
+                using var dialog = new PromptDialog(
+                    "Пароль устройства",
+                    $"{peerName} требует пароль для подключения без подтверждения.",
+                    "", confirmMode: false, secretMode: true);
+
+                source.SetResult(dialog.ShowDialog(owner) == DialogResult.OK ? dialog.InputValue : null);
             }
             catch (Exception ex)
             {

@@ -48,7 +48,12 @@ var config = AgentConfig.Load();
 string? connectTo = null;
 string? viewTarget = null;
 string? inputTestTarget = null;
+string? viewPassword = null;
+string? newPassword = null;
+bool clearPassword = false;
 bool guiMode = guiRequested;
+var openSettings = false;
+int? displayArg = null;
 var captureTestFrames = 0;
 long captureQuality = 70;
 var captureCodec = "mjpeg";
@@ -78,8 +83,21 @@ for (var i = 0; i < args.Length; i++)
         case "--gui":
             guiMode = true;
             break;
+        case "--settings":
+            guiMode = true;
+            openSettings = true;
+            break;
         case "--input-test" when i + 1 < args.Length:
             inputTestTarget = args[++i];
+            break;
+        case "--password" when i + 1 < args.Length:
+            viewPassword = args[++i];
+            break;
+        case "--set-password" when i + 1 < args.Length:
+            newPassword = args[++i];
+            break;
+        case "--clear-password":
+            clearPassword = true;
             break;
         case "--codec" when i + 1 < args.Length:
             var codec = args[++i].ToLowerInvariant();
@@ -111,6 +129,10 @@ for (var i = 0; i < args.Length; i++)
             var capture = args[++i].ToLowerInvariant();
             config.Capture = capture is "auto" or "dxgi" or "gdi" ? capture : "auto";
             break;
+        case "--display" when i + 1 < args.Length:
+            displayArg = int.TryParse(args[++i], out var display) ? Math.Max(0, display) : 0;
+            config.Display = displayArg.Value;
+            break;
         case "--auto-accept":
             config.AutoAccept = true;
             break;
@@ -128,12 +150,16 @@ for (var i = 0; i < args.Length; i++)
                   --connect <id>       подключиться к устройству по 9-значному ID
                   --view <id>          открыть окно просмотра удалённого экрана
                   --input-test <id>    проверить передачу ввода без окна
+                  --password <пароль>  пароль устройства для подключения без подтверждения
+                  --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти
+                  --clear-password     удалить сохранённый пароль профиля и выйти
                   --profile <имя>      отдельный профиль (несколько агентов на машине)
                   --auto-accept        принимать входящие без подтверждения
                   --reset              забыть токен и зарегистрироваться заново
                   --fps <1..60>        частота кадров (по умолчанию 15)
                   --max-width <px>     ширина кадра после масштабирования (0 — без сжатия)
                   --capture <режим>    захват экрана: auto | dxgi | gdi (по умолчанию auto)
+                  --display <номер>    монитор для трансляции (0 — основной)
                   --capture-test [N]   снять N кадров, закодировать и сохранить в %TEMP%
                   --codec <кодек>      видео: h264 (openh264) | mjpeg
                   --quality <10..100>  качество JPEG (по умолчанию 70)
@@ -145,9 +171,32 @@ for (var i = 0; i < args.Length; i++)
     }
 }
 
+if (newPassword is not null || clearPassword)
+{
+    if (clearPassword)
+    {
+        config.ClearUnattendedPassword();
+    }
+    else if (newPassword!.Length < 6)
+    {
+        Console.Error.WriteLine("пароль должен быть не короче 6 символов");
+        return 2;
+    }
+    else
+    {
+        config.SetUnattendedPassword(newPassword);
+    }
+
+    config.Save();
+    Console.WriteLine(clearPassword
+        ? $"пароль устройства удалён (профиль {AgentConfig.Profile})"
+        : $"пароль устройства сохранён (профиль {AgentConfig.Profile})");
+    return 0;
+}
+
 if (captureTestFrames > 0)
 {
-    await CaptureTest.RunAsync(captureTestFrames, captureQuality, config.MaxWidth, config.Capture, captureCodec);
+    await CaptureTest.RunAsync(captureTestFrames, captureQuality, config.MaxWidth, config.Capture, captureCodec, config.Display);
     return 0;
 }
 
@@ -200,7 +249,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec));
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg);
 }
 
 if (inputTestTarget is not null)
@@ -210,7 +259,7 @@ if (inputTestTarget is not null)
 
 if (guiMode)
 {
-    return RunGui(config, client, cts);
+    return RunGui(config, client, cts, openSettings);
 }
 
 var runtime = new AgentRuntime(config, client);
@@ -263,9 +312,11 @@ static void TryAttachParentConsole()
 
 static string PickFreeProfile() => ProfilePicker.Pick();
 
-static int RunViewer(SignalingClient client, string targetId, VideoCodec codec)
+static int RunViewer(
+    SignalingClient client, string targetId, VideoCodec codec, string? password, int? display = null)
 {
-    var session = new ViewerSession(client, targetId, codec);
+    var session = new ViewerSession(client, targetId, codec, password ?? string.Empty);
+    session.PreferredDisplay = display;
     var exitCode = 0;
 
     // WinForms требует STA — создаём отдельный поток, чтобы не зависеть от
@@ -331,7 +382,7 @@ static int RunInputTest(SignalingClient client, string targetId)
     return 0;
 }
 
-static int RunGui(AgentConfig config, SignalingClient client, CancellationTokenSource cts)
+static int RunGui(AgentConfig config, SignalingClient client, CancellationTokenSource cts, bool openSettings = false)
 {
     var runtime = new AgentRuntime(config, client);
     var exitCode = 0;
@@ -342,7 +393,7 @@ static int RunGui(AgentConfig config, SignalingClient client, CancellationTokenS
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using var form = new MainForm(config, client, runtime, cts);
+            using var form = new MainForm(config, client, runtime, cts, openSettings);
             Application.Run(form);
         }
         catch (Exception ex)

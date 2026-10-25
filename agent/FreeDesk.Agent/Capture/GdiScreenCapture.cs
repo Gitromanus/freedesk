@@ -9,8 +9,7 @@ public sealed class GdiScreenCapture : IScreenCapture
 {
     private const int SmCxScreen = 0;
     private const int SmCyScreen = 1;
-    private const uint SrcCopy = 0x00CC0020;
-    private const uint CaptureBlt = 0x40000000;
+    private const uint SrcCopy = 0x00CC0020;    private const uint CaptureBlt = 0x40000000;
     private const uint DibRgbColors = 0;
 
     private readonly IntPtr _screenDc;
@@ -19,6 +18,9 @@ public sealed class GdiScreenCapture : IScreenCapture
     private readonly IntPtr _previousObject;
     private readonly byte[] _buffer;
     private readonly int _stride;
+    private readonly int _originX;
+    private readonly int _originY;
+    private readonly bool _canPrintWindow;
     private BitmapInfo _bitmapInfo;
     private bool _disposed;
 
@@ -26,13 +28,25 @@ public sealed class GdiScreenCapture : IScreenCapture
     public int Height { get; }
 
     public GdiScreenCapture()
+        : this(Displays.Primary())
     {
-        Width = GetSystemMetrics(SmCxScreen);
-        Height = GetSystemMetrics(SmCyScreen);
+    }
+
+    /// <param name="display">Какой монитор снимать (координаты — виртуальные, могут быть отрицательными).</param>
+    public GdiScreenCapture(DisplayInfo display)
+    {
+        Width = display.Width;
+        Height = display.Height;
+        _originX = display.X;
+        _originY = display.Y;
+
+        // PrintWindow умеет только окно целиком от (0,0) — годится лишь для основного
+        // монитора, у которого виртуальные координаты нулевые.
+        _canPrintWindow = display.Primary && display.X == 0 && display.Y == 0;
 
         if (Width <= 0 || Height <= 0)
         {
-            throw new InvalidOperationException("не удалось определить размер экрана");
+            throw new InvalidOperationException($"некорректный размер монитора: {Width}x{Height}");
         }
 
         _stride = Width * 4;
@@ -64,10 +78,11 @@ public sealed class GdiScreenCapture : IScreenCapture
         var desktopHwnd = GetDesktopWindow();
 
         // Пробуем PrintWindow с PW_RENDERFULLCONTENT — захватывает скомпозированный
-        // DWM-вывод без разрывов (в отличие от BitBlt).
-        if (!PrintWindow(desktopHwnd, _memoryDc, 0x00000002)) // PW_RENDERFULLCONTENT
+        // DWM-вывод без разрывов (в отличие от BitBlt). Работает только для основного
+        // монитора: окно рисуется от (0,0), а нам нужен произвольный кусок.
+        if (!_canPrintWindow || !PrintWindow(desktopHwnd, _memoryDc, 0x00000002)) // PW_RENDERFULLCONTENT
         {
-            if (!BitBlt(_memoryDc, 0, 0, Width, Height, _screenDc, 0, 0, SrcCopy | CaptureBlt))
+            if (!BitBlt(_memoryDc, 0, 0, Width, Height, _screenDc, _originX, _originY, SrcCopy | CaptureBlt))
             {
                 throw new InvalidOperationException("BitBlt завершился ошибкой");
             }
@@ -98,8 +113,16 @@ public sealed class GdiScreenCapture : IScreenCapture
             return;
         }
 
-        // координаты экранные; наш memory DC снят с (0,0) — совпадают напрямую
-        DrawIconEx(_memoryDc, info.PositionX, info.PositionY, info.CursorHandle, 0, 0, 0, IntPtr.Zero, DiNormal);
+        // координаты экранные — переводим в локальные координаты монитора
+        var x = info.PositionX - _originX;
+        var y = info.PositionY - _originY;
+
+        if (x < -64 || y < -64 || x > Width + 64 || y > Height + 64)
+        {
+            return;
+        }
+
+        DrawIconEx(_memoryDc, x, y, info.CursorHandle, 0, 0, 0, IntPtr.Zero, DiNormal);
     }
 
     [StructLayout(LayoutKind.Sequential)]

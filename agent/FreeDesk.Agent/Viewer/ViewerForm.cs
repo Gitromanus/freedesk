@@ -10,6 +10,10 @@ public sealed class ViewerForm : ModernWindow
 {
     private readonly ViewerSession _session;
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, BackColor = Ui.Bg };
+    private readonly Panel _displayBar = new() { Dock = DockStyle.Bottom, Height = 42, BackColor = Ui.Card, Visible = false };
+    private readonly List<UiButton> _displayButtons = new();
+    private IReadOnlyList<RemoteDisplay> _displays = Array.Empty<RemoteDisplay>();
+    private int _activeDisplay;
     private readonly Label _status = new()
     {
         Dock = DockStyle.Bottom,
@@ -31,6 +35,7 @@ public sealed class ViewerForm : ModernWindow
     public ViewerForm(ViewerSession session, bool standalone = true)
     {
         _session = session;
+        _session.PasswordPrompt ??= () => PromptDialog.AskPasswordAsync(this, "Удалённое устройство");
 
         Text = "FreeDesk — просмотр";
         Width = 1280;
@@ -54,7 +59,18 @@ public sealed class ViewerForm : ModernWindow
             e.Graphics.DrawLine(pen, 0, 0, _status.Width, 0);
         };
 
+        _displayBar.Paint += (_, e) =>
+        {
+            using var pen = new Pen(Ui.Line);
+            e.Graphics.DrawLine(pen, 0, 0, _displayBar.Width, 0);
+        };
+
+        typeof(Panel).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)?
+            .SetValue(_displayBar, true);
+
+        // порядок добавления = порядок стыковки: полоса мониторов выше строки статуса
         Controls.Add(_canvas);
+        Controls.Add(_displayBar);
         Controls.Add(_status);
 
         _canvas.MouseMove += OnMouseMove;
@@ -73,6 +89,7 @@ public sealed class ViewerForm : ModernWindow
 
         _session.FrameDecoded += OnFrame;
         _session.StatusChanged += OnStatus;
+        _session.DisplaysChanged += OnDisplays;
 
         var displayTimer = new System.Windows.Forms.Timer { Interval = 33 };
         displayTimer.Tick += (_, _) =>
@@ -105,6 +122,66 @@ public sealed class ViewerForm : ModernWindow
     {
         if (IsDisposed) return;
         BeginInvoke(() => _status.Text = text);
+    }
+
+    /// <summary>Хост пришёл со списком мониторов — рисуем кнопки переключения.</summary>
+    private void OnDisplays(IReadOnlyList<RemoteDisplay> displays, int active)
+    {
+        if (IsDisposed) return;
+
+        BeginInvoke(() =>
+        {
+            if (IsDisposed) return;
+
+            _displays = displays;
+            _activeDisplay = active;
+            RebuildDisplayButtons();
+        });
+    }
+
+    private void RebuildDisplayButtons()
+    {
+        foreach (var button in _displayButtons)
+        {
+            _displayBar.Controls.Remove(button);
+            button.Dispose();
+        }
+
+        _displayButtons.Clear();
+
+        // Один монитор — переключать нечего, полоса только крадёт место.
+        if (_displays.Count <= 1)
+        {
+            _displayBar.Visible = false;
+            return;
+        }
+
+        _displayBar.Visible = true;
+        var x = 12;
+
+        foreach (var display in _displays)
+        {
+            var active = display.Index == _activeDisplay;
+            var button = new UiButton($"Монитор {display.Index + 1}")
+            {
+                Ghost = !active,
+                Radius = 8,
+                TabStop = false,
+                Size = new Size(118, 28),
+                Location = new Point(x, 7),
+                TextColor = active ? Color.White : Ui.Muted,
+            };
+
+            button.Click += (_, _) =>
+            {
+                _session.SelectDisplay(display.Index);
+                _canvas.Focus();
+            };
+
+            _displayBar.Controls.Add(button);
+            _displayButtons.Add(button);
+            x += button.Width + 8;
+        }
     }
 
     private void OnFrame(Bitmap bitmap)

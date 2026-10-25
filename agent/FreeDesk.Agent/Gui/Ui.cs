@@ -248,7 +248,35 @@ public abstract class ModernWindow : Form
     protected override void OnLoad(EventArgs e)
     {
         base.OnLoad(e);
+        EnsureOnScreen();
         UpdateMaximizedBounds();
+    }
+
+    /// <summary>
+    /// Windows помнит позицию окна: после смены конфигурации мониторов (или RDP)
+    /// окно может оказаться на несуществующем экране — ничего не видно и не нажать.
+    /// Центрируем на основном экране, а частично вылезшее — подтягиваем внутрь.
+    /// </summary>
+    private void EnsureOnScreen()
+    {
+        var area = Screen.FromRectangle(Bounds).WorkingArea;
+
+        if (!area.IntersectsWith(Bounds) || Bounds.Width < 100 || Bounds.Height < 80)
+        {
+            var primary = Screen.PrimaryScreen!.WorkingArea;
+            Location = new Point(
+                primary.X + Math.Max(0, (primary.Width - Width) / 2),
+                primary.Y + Math.Max(0, (primary.Height - Height) / 2));
+            return;
+        }
+
+        var x = Math.Clamp(Bounds.X, area.X, Math.Max(area.X, area.Right - Width));
+        var y = Math.Clamp(Bounds.Y, area.Y, Math.Max(area.Y, area.Bottom - Height));
+
+        if (x != Bounds.X || y != Bounds.Y)
+        {
+            Location = new Point(x, y);
+        }
     }
 
     protected override void OnLocationChanged(EventArgs e)

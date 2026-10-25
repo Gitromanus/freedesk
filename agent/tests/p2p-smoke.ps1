@@ -3,6 +3,7 @@ param(
     [string]$HostArgs = '',
     [ValidateSet('h264', 'mjpeg')]
     [string]$Codec = 'h264',
+    [string]$Password = '',
     [string]$AgentExe = "$PSScriptRoot\..\FreeDesk.Agent\bin\Debug\net9.0-windows\freedesk-agent.exe"
 )
 
@@ -20,6 +21,13 @@ function Read-Log([string]$path) {
 }
 
 if (-not (Test-Path $AgentExe)) { throw "agent not built: $AgentExe" }
+
+# Пароль хоста — в его профиле: с ним проверяем unattended-доступ, без него — обычное подтверждение.
+if ($Password) {
+    & $AgentExe --profile host --set-password $Password | Out-Null
+} else {
+    & $AgentExe --profile host --clear-password | Out-Null
+}
 
 $hostLog = Join-Path $env:TEMP 'fd-host.log'
 $viewLog = Join-Path $env:TEMP 'fd-viewer.log'
@@ -48,8 +56,11 @@ try {
     Write-Host ("  host id: {0}" -f $hostId)
 
     Write-Host 'starting viewer ...'
+    $viewerArgs = @('--profile', 'viewer', '--name', 'viewer-pc', '--view', $hostId, '--codec', $Codec)
+    if ($Password) { $viewerArgs += @('--password', $Password) }
+
     $viewer = Start-Process -FilePath $AgentExe `
-        -ArgumentList '--profile', 'viewer', '--name', 'viewer-pc', '--view', $hostId, '--codec', $Codec `
+        -ArgumentList $viewerArgs `
         -RedirectStandardOutput $viewLog -RedirectStandardError "$viewLog.err" `
         -PassThru -NoNewWindow
 

@@ -1,7 +1,11 @@
 using System.Drawing;
+using System.Text.Json;
 using FreeDesk.Agent.Codec;
 
 namespace FreeDesk.Agent;
+
+/// <summary>Монитор на стороне хоста (для кнопок переключения).</summary>
+public sealed record RemoteDisplay(int Index, int Width, int Height, bool Primary);
 
 /// <summary>Сторона зрителя: инициирует сессию, принимает кадры, отправляет ввод.</summary>
 public sealed class ViewerSession : IAsyncDisposable
@@ -9,6 +13,8 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly SignalingClient _client;
     private readonly string _targetId;
     private readonly VideoCodec _codec;
+    private readonly bool _passwordFromCli;
+    private string? _password;
     private H264Decoder? _decoder;
     private IPeerTransport? _peer;
     private string? _sessionId;
@@ -25,17 +31,32 @@ public sealed class ViewerSession : IAsyncDisposable
     /// <summary>Готовый кадр для показа (уже декодированный).</summary>
     public event Action<Bitmap>? FrameDecoded;
 
+    /// <summary>Список мониторов хоста и активный номер.</summary>
+    public event Action<IReadOnlyList<RemoteDisplay>, int>? DisplaysChanged;
+
+    /// <summary>Монитор, на который надо переключиться сразу после подключения (CLI/UI).</summary>
+    public int? PreferredDisplay { get; set; }
+
     public event Action<string>? StatusChanged;
     public event Action? Connected;
 
     /// <summary>Сессия завершилась (канал закрыт, сервер закончил или ошибка) — UI возвращается к стартовому экрану.</summary>
     public event Action? Ended;
 
-    public ViewerSession(SignalingClient client, string targetId, VideoCodec codec = VideoCodec.Mjpeg)
+    /// <summary>
+    /// Спросить у пользователя пароль устройства (unattended-доступ).
+    /// Возвращает null, если пользователь отказался.
+    /// </summary>
+    public Func<Task<string?>>? PasswordPrompt { get; set; }
+
+    public ViewerSession(
+        SignalingClient client, string targetId, VideoCodec codec = VideoCodec.Mjpeg, string? password = null)
     {
         _client = client;
         _targetId = targetId;
         _codec = codec;
+        _password = password;
+        _passwordFromCli = _password is not null;
         _decoder = codec == VideoCodec.H264 ? new H264Decoder() : null;
     }
 
@@ -142,9 +163,20 @@ public sealed class ViewerSession : IAsyncDisposable
                 using var document = System.Text.Json.JsonDocument.Parse(json);
                 var root = document.RootElement;
 
-                if (root.TryGetProperty("t", out var type) && type.GetString() == "cb")
+                if (!root.TryGetProperty("t", out var type))
                 {
-                    _clipboard.Incoming(root);
+                    return;
+                }
+
+                switch (type.GetString())
+                {
+                    case "cb":
+                        _clipboard.Incoming(root);
+                        break;
+
+                    case "displays":
+                        HandleDisplays(root);
+                        break;
                 }
             }
             catch (System.Text.Json.JsonException)
@@ -163,6 +195,63 @@ public sealed class ViewerSession : IAsyncDisposable
         await _client.SignalAsync(_sessionId!, "offer", offer, ct);
         _offerSent = true;
         StatusChanged?.Invoke("offer отправлен, ждём ответ");
+    }
+
+    /// <summary>Хост прислал список мониторов: показываем кнопки переключения.</summary>
+    private void HandleDisplays(JsonElement root)
+    {
+        if (!root.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var list = new List<RemoteDisplay>();
+
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object ||
+                !item.TryGetProperty("i", out var index) ||
+                !item.TryGetProperty("w", out var width) ||
+                !item.TryGetProperty("h", out var height))
+            {
+                continue;
+            }
+
+            var primary = item.TryGetProperty("p", out var flag) && flag.ValueKind == JsonValueKind.True;
+            list.Add(new RemoteDisplay(index.GetInt32(), width.GetInt32(), height.GetInt32(), primary));
+        }
+
+        var active = root.TryGetProperty("active", out var value) ? value.GetInt32() : 0;
+
+        // «--display N»: один раз просим нужный монитор, дальше выбор за кнопками
+        if (PreferredDisplay is int preferred && preferred != active)
+        {
+            PreferredDisplay = null;
+            SelectDisplay(preferred);
+            return;
+        }
+
+        DisplaysChanged?.Invoke(list, active);
+    }
+
+    /// <summary>Попросить хост переключиться на другой монитор.</summary>
+    public void SelectDisplay(int index)
+    {
+        var peer = _peer;
+
+        if (peer is null)
+        {
+            return;
+        }
+
+        try
+        {
+            peer.SendControl(JsonSerializer.Serialize(new { t = "mon", i = index }));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"не удалось переключить монитор: {ex.Message}");
+        }
     }
 
     /// <summary>Пришёл кадр от хоста: JPEG или H.264 access unit.</summary>
@@ -230,7 +319,94 @@ public sealed class ViewerSession : IAsyncDisposable
             case "offer":
                 // зритель всегда инициирует сам
                 break;
+
+            case "challenge":
+                await AnswerChallengeAsync(message.Payload, ct);
+                break;
+
+            case "auth_failed":
+                // пароль из CLI не переспрашиваем — пусть хост добьёт попытки до отказа;
+                // введённый вручную забываем, чтобы спросить заново (хост пришлёт новый challenge)
+                if (!_passwordFromCli)
+                {
+                    _password = null;
+                }
+
+                Log.Warn("неверный пароль устройства");
+                StatusChanged?.Invoke("неверный пароль устройства");
+                break;
         }
+    }
+
+    /// <summary>
+    /// Хост прислал challenge — отвечаем PBKDF2(пароль → хеш, nonce).
+    /// Пароль берём из CLI либо спрашиваем у пользователя; сам пароль по сети не идёт.
+    /// </summary>
+    private async Task AnswerChallengeAsync(JsonElement payload, CancellationToken ct)
+    {
+        if (payload.ValueKind != JsonValueKind.Object ||
+            !payload.TryGetProperty("nonce", out var nonceValue) ||
+            !payload.TryGetProperty("salt", out var saltValue) ||
+            !payload.TryGetProperty("iterations", out var iterationsValue))
+        {
+            StatusChanged?.Invoke("устройство прислало некорректный запрос пароля");
+            return;
+        }
+
+        var nonce = nonceValue.GetString();
+        var salt = saltValue.GetString();
+
+        if (string.IsNullOrEmpty(nonce) || string.IsNullOrEmpty(salt))
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(_password) && PasswordPrompt is not null)
+        {
+            Log.Info("устройство требует пароль — спрашиваю у пользователя");
+            StatusChanged?.Invoke("устройство требует пароль");
+            _password = await PasswordPrompt();
+        }
+
+        if (string.IsNullOrEmpty(_password))
+        {
+            Log.Warn("пароль устройства не введён — отклоняю заявку");
+            StatusChanged?.Invoke("нет пароля устройства");
+            await RejectAsync(ct);
+            return;
+        }
+
+        try
+        {
+            var hash = UnattendedAuth.Derive(_password!, Convert.FromBase64String(salt), iterationsValue.GetInt32());
+            var proof = UnattendedAuth.ComputeProof(hash, nonce, iterationsValue.GetInt32());
+
+            await _client.SignalAsync(_sessionId!, "auth", new { proof }, ct);
+            Log.Info("пароль отправлен, ждём подтверждения");
+            StatusChanged?.Invoke("пароль отправлен, ждём подтверждения");
+        }
+        catch (FormatException)
+        {
+            StatusChanged?.Invoke("устройство прислало некорректный запрос пароля");
+        }
+    }
+
+    /// <summary>Отказаться от сессии (нет пароля, отмена ввода) без исключений наружу.</summary>
+    private async Task RejectAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (_sessionId is not null)
+            {
+                await _client.AnswerAsync(_sessionId, "reject", ct);
+            }
+        }
+        catch (Exception ex) when (ex is ApiException or HttpRequestException)
+        {
+            Log.Warn($"заявка не отклонена: {ex.Message}");
+        }
+
+        Ended?.Invoke();
     }
 
     public void SendInput(string json) => _peer?.SendControl(json);

@@ -41,6 +41,7 @@ public sealed class MainForm : ModernWindow
     private ViewerForm? _viewerForm;
     private ViewerSession? _session;
     private bool _connecting;
+    private readonly bool _openSettingsAtStart;
     private bool _sidebarCollapsed;
     private bool _collapsedForSession;
     private int _hoveredRecent = -1;
@@ -54,12 +55,15 @@ public sealed class MainForm : ModernWindow
     private Color _statusColor = Ui.Amber;
     private int _statusDotY;
 
-    public MainForm(AgentConfig config, SignalingClient client, AgentRuntime runtime, CancellationTokenSource cts)
+    public MainForm(
+        AgentConfig config, SignalingClient client, AgentRuntime runtime, CancellationTokenSource cts,
+        bool openSettingsAtStart = false)
     {
         _config = config;
         _client = client;
         _runtime = runtime;
         _cts = cts;
+        _openSettingsAtStart = openSettingsAtStart;
 
         _recentPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -572,7 +576,16 @@ public sealed class MainForm : ModernWindow
             }
         });
 
-        Load += (_, _) => _ = StartAsync();
+        Load += (_, _) =>
+        {
+            _ = StartAsync();
+
+            // --settings: открыть настройки сразу (удобно для первичной настройки машины)
+            if (_openSettingsAtStart)
+            {
+                BeginInvoke(OpenSettings);
+            }
+        };
         FormClosing += (_, _) => _cts.Cancel();
     }
 

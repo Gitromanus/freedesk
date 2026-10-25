@@ -6,9 +6,14 @@ namespace FreeDesk.Agent.Capture;
 /// </summary>
 public static class CaptureFactory
 {
-    public static IScreenCapture Create(string mode)
+    /// <param name="display">Монитор; null — основной.</param>
+    public static IScreenCapture Create(string mode, DisplayInfo? display = null)
     {
-        if (mode != "gdi")
+        display ??= Displays.Primary();
+
+        // DXGI дублирует вывод адаптера целиком — умеем только основной монитор.
+        // Остальные снимаем GDI по координатам монитора.
+        if (display.Primary && mode != "gdi")
         {
             try
             {
@@ -25,7 +30,11 @@ public static class CaptureFactory
                 Log.Warn($"dxgi недоступен ({ex.Message}), использую gdi");
             }
         }
+        else if (!display.Primary && mode == "dxgi")
+        {
+            Log.Warn($"dxgi умеет только основной монитор, для {display} использую gdi");
+        }
 
-        return new GdiScreenCapture();
+        return new GdiScreenCapture(display);
     }
 }

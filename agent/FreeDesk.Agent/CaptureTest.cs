@@ -7,13 +7,15 @@ namespace FreeDesk.Agent;
 /// <summary>Проверка конвейера захвата: снимает N кадров, кодирует и сохраняет последний.</summary>
 public static class CaptureTest
 {
-    public static Task RunAsync(int frames, long quality, int maxWidth, string captureMode, string codec = "mjpeg")
+    public static Task RunAsync(
+        int frames, long quality, int maxWidth, string captureMode, string codec = "mjpeg", int displayIndex = 0)
     {
-        using var capture = CaptureFactory.Create(captureMode);
+        var display = Capture.Displays.ByIndex(displayIndex);
+        using var capture = CaptureFactory.Create(captureMode, display);
         var outputPath = Path.Combine(Path.GetTempPath(), codec == "h264" ? "freedesk-frame.h264" : "freedesk-frame.jpg");
 
-        Log.Info($"захват: {capture.GetType().Name} {capture.Width}x{capture.Height}, кадров {frames}, " +
-                 $"кодек {codec}, качество {quality}, ширина {maxWidth}");
+        Log.Info($"захват: {capture.GetType().Name} {capture.Width}x{capture.Height} (монитор #{display.Index}), " +
+                 $"кадров {frames}, кодек {codec}, качество {quality}, ширина {maxWidth}");
 
         long lastSize;
         var stopwatch = Stopwatch.StartNew();
