@@ -65,6 +65,7 @@ string? downloadPath = null;
 var captureTestFrames = 0;
 long captureQuality = 70;
 var captureCodec = "mjpeg";
+var connectTargets = new List<string>();
 
 for (var i = 0; i < args.Length; i++)
 {
@@ -81,6 +82,7 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--connect" when i + 1 < args.Length:
             connectTo = args[++i];
+            connectTargets.Add(connectTo);
             break;
         case "--view" when i + 1 < args.Length:
             viewTarget = args[++i];
@@ -305,7 +307,7 @@ if (inputTestTarget is not null)
 
 if (guiMode)
 {
-    return RunGui(config, client, cts, openSettings, startHidden, sendFile);
+    return RunGui(config, client, cts, openSettings, startHidden, sendFile, connectTargets);
 }
 
 var runtime = new AgentRuntime(config, client)
@@ -444,7 +446,8 @@ static int RunInputTest(SignalingClient client, string targetId, string? passwor
 
 static int RunGui(
     AgentConfig config, SignalingClient client, CancellationTokenSource cts,
-    bool openSettings = false, bool startHidden = false, string? autoSendFile = null)
+    bool openSettings = false, bool startHidden = false, string? autoSendFile = null,
+    List<string>? autoConnect = null)
 {
     var runtime = new AgentRuntime(config, client)
     {
@@ -458,7 +461,7 @@ static int RunGui(
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using var form = new MainForm(config, client, runtime, cts, openSettings, startHidden);
+            using var form = new MainForm(config, client, runtime, cts, openSettings, startHidden, autoConnect);
             Application.Run(form);
         }
         catch (Exception ex)

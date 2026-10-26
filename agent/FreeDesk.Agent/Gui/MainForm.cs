@@ -14,6 +14,9 @@ public sealed class MainForm : ModernWindow
     private const int SidebarWidth = 340;
     private const int SidebarCollapsedWidth = 56;
 
+    /// <summary>Больше — уже перебор: каждый поток декодируется отдельно.</summary>
+    private const int MaxSessions = 4;
+
     private readonly AgentConfig _config;
     private readonly SignalingClient _client;
     private readonly AgentRuntime _runtime;
@@ -23,6 +26,8 @@ public sealed class MainForm : ModernWindow
     private readonly DoubleBufferedPanel _sidebar = new();
     private readonly DoubleBufferedPanel _mainArea = new();
     private readonly DoubleBufferedPanel _hero = new();
+    private readonly DoubleBufferedPanel _viewerHost = new();
+    private readonly SessionTabStrip _tabStrip = new();
 
     private readonly Label _idLabel = new();
     private readonly Label _statusText = new();
@@ -33,18 +38,17 @@ public sealed class MainForm : ModernWindow
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronLeft);
     private readonly CaptionButton _settingsBtn = new(CaptionGlyph.Settings);
 
-    private ViewerForm? _viewerForm;
-    private ViewerSession? _session;
-    private bool _connecting;
+    // несколько подключений одновременно: одна вкладка — одна сессия
+    private readonly List<ViewerTab> _sessions = new();
+    private readonly HashSet<string> _connectingTargets = new();
+    private ViewerTab? _active;
+
     private readonly bool _openSettingsAtStart;
+    private readonly IReadOnlyList<string> _autoConnect;
     private bool _sidebarCollapsed;
     private bool _collapsedForSession;
+    private bool _autoCollapsedOnce;
     private int _hoveredRecent = -1;
-
-    // автопереподключение при обрыве (не при ручном «Отключиться»)
-    private string? _lastTarget;
-    private int _reconnectAttempts;
-    private bool _userDisconnected;
 
     private readonly string _recentPath;
     private Color _statusColor = Ui.Amber;
@@ -57,7 +61,7 @@ public sealed class MainForm : ModernWindow
 
     public MainForm(
         AgentConfig config, SignalingClient client, AgentRuntime runtime, CancellationTokenSource cts,
-        bool openSettingsAtStart = false, bool startHidden = false)
+        bool openSettingsAtStart = false, bool startHidden = false, IReadOnlyList<string>? autoConnect = null)
     {
         _config = config;
         _client = client;
@@ -65,6 +69,7 @@ public sealed class MainForm : ModernWindow
         _cts = cts;
         _openSettingsAtStart = openSettingsAtStart;
         _startHidden = startHidden;
+        _autoConnect = autoConnect ?? Array.Empty<string>();
 
         _recentPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -108,6 +113,9 @@ public sealed class MainForm : ModernWindow
 
         _mainArea.Location = new Point(_sidebar.Width, 0);
         _mainArea.Size = new Size(Math.Max(0, _root.Width - _sidebar.Width), Math.Max(0, _root.Height));
+
+        // панель всегда сверху: иначе её верхняя часть (шеврон) может ловить не те клики
+        _sidebar.BringToFront();
     }
 
     // ─────────── боковая панель ───────────
@@ -295,6 +303,8 @@ public sealed class MainForm : ModernWindow
     {
         _sidebarCollapsed = !_sidebarCollapsed;
 
+        Log.Info($"панель: {(_sidebarCollapsed ? "свёрнута" : "развёрнута")}, ширина {_sidebar.Width}");
+
         if (_sidebarCollapsed)
         {
             _sidebar.Width = SidebarCollapsedWidth;
@@ -420,12 +430,185 @@ public sealed class MainForm : ModernWindow
     private void BuildMainArea()
     {
         _mainArea.BackColor = Ui.Bg;
-        _mainArea.Padding = new Padding(24);
+        _mainArea.Padding = new Padding(0);
+        _mainArea.Resize += (_, _) => LayoutMainArea();
 
-        _hero.Dock = DockStyle.Fill;
         _hero.BackColor = Ui.Bg;
         _hero.Paint += DrawHero;
+        _hero.SendToBack();
+
+        _viewerHost.BackColor = Ui.Bg;
+        _viewerHost.Visible = false;
+
+        _tabStrip.Visible = false;
+        _tabStrip.TabActivated += ActivateIndex;
+        _tabStrip.TabClosed += CloseTabAt;
+        _tabStrip.NewTabClicked += OnNewTabClicked;
+
+        // Раскладка ручная: с Dock полоска вкладок ложилась поверх экрана,
+        // потому что Fill-панель забирала всю площадь.
+        _hero.Dock = DockStyle.None;
+        _viewerHost.Dock = DockStyle.None;
+        _tabStrip.Dock = DockStyle.None;
+
         _mainArea.Controls.Add(_hero);
+        _mainArea.Controls.Add(_viewerHost);
+        _mainArea.Controls.Add(_tabStrip);
+
+        // Вкладки и экран должны быть поверх фоновой панели, иначе клики
+        // достаются не тому окну.
+        _viewerHost.SendToBack();
+        _tabStrip.BringToFront();
+
+        LayoutMainArea();
+    }
+
+    private const int TabStripHeight = 38;
+
+    /// <summary>Вкладки сверху, под ними — экран (или форма подключения).</summary>
+    private void LayoutMainArea()
+    {
+        var width = _mainArea.ClientSize.Width;
+        var height = _mainArea.ClientSize.Height;
+        var top = _tabStrip.Visible ? TabStripHeight : 0;
+        var pad = _sessions.Count > 0 ? 0 : 24;
+
+        _tabStrip.Bounds = new Rectangle(0, 0, width, TabStripHeight);
+        _viewerHost.Bounds = new Rectangle(0, top, width, Math.Max(0, height - top));
+        _hero.Bounds = new Rectangle(
+            pad, top + pad,
+            Math.Max(0, width - pad * 2), Math.Max(0, height - top - pad * 2));
+
+        Log.Info($"главная: полоска {_tabStrip.Bounds} видна={_tabStrip.Visible}, экран {_viewerHost.Bounds} виден={_viewerHost.Visible}");    }
+
+    // ─────────── вкладки подключений ───────────
+
+    /// <summary>Одно подключение: сессия, встроенное окно просмотра и своё состояние.</summary>
+    private sealed class ViewerTab
+    {
+        public string Target = "";
+        public string Name = "";
+        public ViewerSession? Session;
+        public ViewerForm? View;
+        public int ReconnectAttempts;
+        public bool UserDisconnected;
+
+        public string Title => string.IsNullOrWhiteSpace(Name) ? FormatId(Target) : Name;
+    }
+
+    private void RefreshTabs()
+    {
+        _tabStrip.Visible = _sessions.Count > 0;
+        _tabStrip.SetTabs(BuildTabInfos(_active), _active is null ? -1 : _sessions.IndexOf(_active));
+
+        _hero.Visible = _active?.View is null;
+        _viewerHost.Visible = _active?.View is not null;
+
+        LayoutMainArea();
+
+        foreach (var tab in _sessions)
+        {
+            if (tab.View is not null)
+            {
+                var isActive = ReferenceEquals(tab, _active);
+
+                // Дочерние формы (TopLevel=false) ненадёжно скрываются через Visible —
+                // прячем/показываем их окна явно, иначе на экране остаётся старое видео.
+                if (isActive)
+                {
+                    tab.View.Show();
+                    tab.View.BringToFront();
+                }
+                else
+                {
+                    tab.View.Hide();
+                }
+            }
+        }
+    }
+
+    private List<SessionTabStrip.TabInfo> BuildTabInfos(ViewerTab? active) =>
+        _sessions.Select(tab => new SessionTabStrip.TabInfo
+        {
+            Title = tab.Title,
+            Subtitle = FormatId(tab.Target),
+            Active = ReferenceEquals(tab, active),
+            Dot = tab.Session is null || tab.View is null
+                ? Ui.Amber
+                : tab.ReconnectAttempts > 0 ? Ui.Amber : Ui.Green,
+        }).ToList();
+
+    private void ActivateIndex(int index)
+    {
+        if (index < 0 || index >= _sessions.Count)
+        {
+            return;
+        }
+
+        Activate(_sessions[index]);
+    }
+
+    private void Activate(ViewerTab tab)
+    {
+        _active = tab;
+        RefreshTabs();
+
+        Log.Info($"вкладка активна: {tab.Title} ({FormatId(tab.Target)}), всего вкладок {_sessions.Count}");
+
+        tab.View?.BringToFront();
+        tab.View?.Focus();
+
+        SetCaption("FreeDesk", $"· {tab.Title} · {FormatId(tab.Target)}");
+
+        if (tab.Session is null)
+        {
+            SetStatus("Подключение…", Ui.Amber);
+        }
+        else if (tab.ReconnectAttempts > 0)
+        {
+            SetStatus($"Связь потеряна, переподключение {tab.ReconnectAttempts} из 3…", Ui.Amber);
+        }
+        else
+        {
+            SetStatus("Подключено", Ui.Green);
+        }
+    }
+
+    /// <summary>Показать форму подключения рядом с вкладками («+» в полоске).</summary>
+    private void OnNewTabClicked()
+    {
+        _active = null;
+        _tabStrip.SetTabs(BuildTabInfos(null), -1);
+        _hero.Visible = true;
+        _viewerHost.Visible = false;
+
+        foreach (var tab in _sessions)
+        {
+            if (tab.View is not null)
+            {
+                tab.View.Visible = false;
+            }
+        }
+
+        SetCaption("FreeDesk");
+
+        if (_sidebarCollapsed)
+        {
+            _collapsedForSession = false;
+            ToggleSidebar();
+        }
+
+        _targetInput.Box.Focus();
+    }
+
+    private void CloseTabAt(int index)
+    {
+        if (index < 0 || index >= _sessions.Count)
+        {
+            return;
+        }
+
+        DisconnectTab(_sessions[index]);
     }
 
     private void DrawHero(object? sender, PaintEventArgs e)
@@ -602,6 +785,9 @@ public sealed class MainForm : ModernWindow
             _idLabel.Text = FormatId(_config.PublicId ?? "?");
             LoadRecent();
             _ = Task.Run(() => _runtime.RunAsync(null, _cts.Token));
+
+            // --connect ID (можно несколько): подключаемся сразу после регистрации
+            _ = AutoConnectAsync();
         }
         catch (Exception ex)
         {
@@ -609,13 +795,26 @@ public sealed class MainForm : ModernWindow
         }
     }
 
+    /// <summary>Подключения, заданные в командной строке: --connect ID1 --connect ID2.</summary>
+    private async Task AutoConnectAsync()
+    {
+        foreach (var target in _autoConnect)
+        {
+            if (_cts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            await ConnectAsync(target);
+        }
+    }
+
     // ─────────── подключение ───────────
 
-    private async Task ConnectAsync(string? targetOverride = null)
+    private async Task ConnectAsync(string? targetOverride = null, ViewerTab? reuse = null)
     {
-        if (_connecting) return;
+        var target = (targetOverride ?? reuse?.Target ?? _targetInput.InputText).Trim().Replace(" ", "");
 
-        var target = (targetOverride ?? _targetInput.InputText).Trim().Replace(" ", "");
         if (target.Length != 9 || !long.TryParse(target, out _))
         {
             SetStatus("ID — девять цифр", Ui.Red);
@@ -623,18 +822,53 @@ public sealed class MainForm : ModernWindow
             return;
         }
 
-        _connecting = true;
+        // одно и то же устройство — одно подключение
+        if (_connectingTargets.Contains(target))
+        {
+            return;
+        }
+
+        if (reuse is null && _sessions.Any(t => t.Target == target))
+        {
+            Activate(_sessions.First(t => t.Target == target));
+            SetStatus($"Уже подключено: {FormatId(target)}", Ui.Amber);
+            return;
+        }
+
+        if (reuse is null && _sessions.Count >= MaxSessions)
+        {
+            SetStatus($"Больше {MaxSessions} подключений сразу не держим", Ui.Red);
+            return;
+        }
+
+        _connectingTargets.Add(target);
         _connectBtn.Enabled = false;
         _targetInput.Box.ReadOnly = true;
-        SetStatus("Подключение…", Ui.Amber);
+
+        var tab = reuse ?? new ViewerTab { Target = target };
+        tab.Target = target;
+        tab.ReconnectAttempts = 0;
+        tab.UserDisconnected = false;
+
+        if (reuse is null)
+        {
+            _sessions.Add(tab);
+        }
+        else
+        {
+            // переподключение: старое окно просмотра уже убрано
+            tab.Session = null;
+        }
+
+        Activate(tab);
+        SetStatus($"Подключение к {FormatId(target)}…", Ui.Amber);
 
         var lastStatus = "";
 
         try
         {
-            Disconnect(keepStatus: true);
-            _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec), null, _config);
-            var session = _session;
+            var session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec), null, _config);
+            tab.Session = session;
 
             // Пароль спрашиваем у главного окна: встроенное окно просмотра ещё не создано
             // и не может быть владельцем модального диалога.
@@ -642,19 +876,22 @@ public sealed class MainForm : ModernWindow
                 PromptDialog.AskPasswordAsync(this, $"Устройство {FormatId(target)}");
 
             var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            lastStatus = "";
 
             session.Connected += () => connected.TrySetResult(true);
             session.StatusChanged += text =>
             {
                 lastStatus = text;
-                SetStatus(text, Ui.Amber);
+
+                if (ReferenceEquals(tab, _active))
+                {
+                    SetStatus(text, Ui.Amber);
+                }
             };
 
             // Сессия может закончиться до соединения (неверный ID, отказ, обрыв):
             // будить ожидание сразу, а не ждать 90 секунд.
             session.Ended += () => connected.TrySetResult(false);
-            session.Ended += () => OnUiSessionEnded(session);
+            session.Ended += () => OnUiSessionEnded(tab, session);
             session.Start();
 
             // 90 с: хост даёт 60 с на ввод пароля, плюс запас на сам ввод
@@ -669,11 +906,8 @@ public sealed class MainForm : ModernWindow
                 }
             }
 
-            ShowViewer(target);
-            SetStatus("Подключено", Ui.Green);
-            _lastTarget = target;
-            _reconnectAttempts = 0;
-            _userDisconnected = false;
+            ShowViewer(tab);
+            SetStatus($"Подключено: {FormatId(target)}", Ui.Green);
 
             var name = target;
             try
@@ -685,23 +919,31 @@ public sealed class MainForm : ModernWindow
             {
             }
 
-            SetCaption("FreeDesk", $"· {name} · {FormatId(target)}");
+            tab.Name = name;
+            RefreshTabs();
+
+            if (ReferenceEquals(tab, _active))
+            {
+                SetCaption("FreeDesk", $"· {name} · {FormatId(target)}");
+            }
+
             AddRecent(target, name);
         }
         catch (Exception ex)
         {
-            if (_session is not null)
+            if (tab.Session is not null)
             {
-                var failed = _session;
-                _session = null;
+                var failed = tab.Session;
+                tab.Session = null;
                 await failed.DisposeAsync();
             }
 
+            RemoveTab(tab);
             SetStatus(CleanReason(string.IsNullOrWhiteSpace(lastStatus) ? ex.Message : lastStatus), Ui.Red);
         }
         finally
         {
-            _connecting = false;
+            _connectingTargets.Remove(target);
             _connectBtn.Enabled = true;
             _targetInput.Box.ReadOnly = false;
         }
@@ -733,112 +975,175 @@ public sealed class MainForm : ModernWindow
         }
     }
 
-    private void ShowViewer(string target)
+    private void ShowViewer(ViewerTab tab)
     {
-        _hero.Visible = false;
-
-        // экрану полезнее место — панель сама сворачивается, отступы убираем
-        _mainArea.Padding = new Padding(0);
-
-        if (!_sidebarCollapsed)
+        if (tab.Session is null)
         {
+            return;
+        }
+
+        _hero.Visible = false;
+        _viewerHost.Visible = true;
+
+        // экрану полезнее место — панель сама сворачивается, но только один раз:
+        // иначе она будет спорить с ручным разворотом при каждом переподключении
+        if (!_sidebarCollapsed && !_autoCollapsedOnce)
+        {
+            _autoCollapsedOnce = true;
             _collapsedForSession = true;
             ToggleSidebar();
         }
 
-        if (_viewerForm is not null)
-        {
-            _mainArea.Controls.Remove(_viewerForm);
-            _viewerForm.Dispose();
-        }
-
-        _viewerForm = new ViewerForm(_session!, standalone: false)
+        var view = new ViewerForm(tab.Session, standalone: false)
         {
             Dock = DockStyle.Fill,
             TopLevel = false,
             FormBorderStyle = FormBorderStyle.None,
         };
 
-        _viewerForm.DisconnectRequested += () =>
-        {
-            Disconnect();
-            OnSessionEnded();
-        };
+        view.DisconnectRequested += () => DisconnectTab(tab);
 
-        _mainArea.Controls.Add(_viewerForm);
-        _viewerForm.BringToFront();
-        _viewerForm.Show();
+        tab.View = view;
+        _viewerHost.Controls.Add(view);
+        view.Show();
+
+        RefreshTabs();
+        view.BringToFront();
+        view.Focus();
     }
 
-    private void OnSessionEnded()
+    /// <summary>Убрать вкладку: закрыть сессию и её окно просмотра.</summary>
+    private void RemoveTab(ViewerTab tab)
     {
-        _session = null;        SetCaption("FreeDesk");
-        _mainArea.Padding = new Padding(24);
+        var wasActive = ReferenceEquals(tab, _active);
+        var index = _sessions.IndexOf(tab);
 
-        if (_viewerForm is not null)
+        Log.Info($"вкладка закрыта: {tab.Title} ({FormatId(tab.Target)}), осталось {_sessions.Count - 1}");
+
+        _sessions.Remove(tab);
+
+        if (tab.View is not null)
         {
-            _mainArea.Controls.Remove(_viewerForm);
-            _viewerForm.Dispose();
-            _viewerForm = null;
+            _viewerHost.Controls.Remove(tab.View);
+            tab.View.Dispose();
+            tab.View = null;
         }
 
-        // панель возвращается, если мы сворачивали её ради просмотра
-        if (_collapsedForSession && _sidebarCollapsed)
+        if (wasActive)
+        {
+            _active = _sessions.Count == 0
+                ? null
+                : _sessions[Math.Min(index, _sessions.Count - 1)];
+
+            if (_active is not null)
+            {
+                Activate(_active);
+            }
+        }
+
+        if (_active is null)
+        {
+            SetCaption("FreeDesk");
+            _hero.Visible = true;
+            _viewerHost.Visible = false;
+        }
+
+        RefreshTabs();
+
+        // панель возвращается, если мы сворачивали её ради просмотра и смотреть больше нечего
+        if (_sessions.Count == 0 && _collapsedForSession && _sidebarCollapsed)
         {
             _collapsedForSession = false;
+            _autoCollapsedOnce = false;
             ToggleSidebar();
         }
-
-        _hero.Visible = true;
-        _hero.Invalidate();
-        SetStatus("Соединение закрыто", Ui.Amber);
     }
 
-    private void Disconnect(bool keepStatus = false)
+    /// <summary>Пользователь закрыл вкладку или нажал «Отключиться».</summary>
+    private void DisconnectTab(ViewerTab tab)
     {
-        _userDisconnected = true;
-        _reconnectAttempts = 0;
+        tab.UserDisconnected = true;
+        tab.ReconnectAttempts = 0;
 
-        if (_session is not null)
+        if (tab.Session is not null)
         {
-            var session = _session;
-            _session = null;
+            var session = tab.Session;
+            tab.Session = null;
             _ = session.DisposeAsync();
         }
 
-        OnSessionEnded();
+        RemoveTab(tab);
 
-        if (!keepStatus)
+        if (ReferenceEquals(tab, _active) || _sessions.Count == 0)
         {
             SetStatus("Отключено", Ui.Amber);
         }
     }
 
-    private void OnUiSessionEnded(ViewerSession ended) => BeginInvoke(() =>
+    private void OnUiSessionEnded(ViewerTab tab, ViewerSession ended) => BeginInvoke(() =>
     {
-        // Пока шло подключение, экраном и сообщением об ошибке заведует ConnectAsync.
-        // И сессия могла уже быть заменена новой — тогда это её событие, не наше.
-        if (_connecting || !ReferenceEquals(_session, ended))
+        // Пока шло подключение, экраном и сообщением об ошибке заведует ConnectAsync;
+        // и сессия могла уже быть заменена новой.
+        if (_connectingTargets.Contains(tab.Target) || !ReferenceEquals(tab.Session, ended))
         {
             return;
         }
 
-        // связь оборвалась сама — пробуем вернуть, пока не исчерпаны попытки
-        if (!_userDisconnected && _viewerForm is not null && _lastTarget is not null &&
-            _reconnectAttempts < 3 && !_cts.IsCancellationRequested)
+        if (tab.UserDisconnected)
         {
-            _reconnectAttempts++;
-            SetStatus($"Связь потеряна, переподключение {_reconnectAttempts} из 3…", Ui.Amber);
+            return;
+        }
 
-            var target = _lastTarget;
+        // связь оборвалась сама — пробуем вернуть именно эту вкладку
+        if (tab.View is not null && tab.ReconnectAttempts < 3 && !_cts.IsCancellationRequested)
+        {
+            tab.ReconnectAttempts++;
+
+            if (ReferenceEquals(tab, _active))
+            {
+                SetStatus($"Связь потеряна, переподключение {tab.ReconnectAttempts} из 3…", Ui.Amber);
+            }
+
+            if (tab.View is not null)
+            {
+                _viewerHost.Controls.Remove(tab.View);
+                tab.View.Dispose();
+                tab.View = null;
+            }
+
+            tab.Session = null;
+            RefreshTabs();
+
+            var target = tab.Target;
+            var attempts = tab.ReconnectAttempts;
+
             Task.Delay(2000).ContinueWith(
-                _ => { if (!_cts.IsCancellationRequested) BeginInvoke(() => _ = ConnectAsync(target)); },
+                _ =>
+                {
+                    if (_cts.IsCancellationRequested)
+                    {
+                        return;
+                    }
+
+                    BeginInvoke(() =>
+                    {
+                        if (!_sessions.Contains(tab) || tab.UserDisconnected)
+                        {
+                            return;
+                        }
+
+                        // попытки уже могли смениться ручным подключением — не сбиваем счётчик
+                        tab.ReconnectAttempts = attempts;
+                        _ = ConnectAsync(target, tab);
+                    });
+                },
                 TaskScheduler.Default);
 
             return;
         }
 
-        OnSessionEnded();
+        RemoveTab(tab);
+        SetStatus("Соединение закрыто", Ui.Amber);
     });
 
     // ─────────── настройки ───────────
@@ -1146,7 +1451,51 @@ public sealed class MainForm : ModernWindow
             return;
         }
 
+        CloseAllSessions();
         base.OnFormClosing(e);
+    }
+
+    /// <summary>Закрыть все подключения при выходе — иначе сервер считает их живыми.</summary>
+    private void CloseAllSessions()
+    {
+        foreach (var tab in _sessions.ToList())
+        {
+            tab.UserDisconnected = true;
+
+            if (tab.Session is not null)
+            {
+                var session = tab.Session;
+                tab.Session = null;
+                _ = session.DisposeAsync();
+            }
+        }
+
+        _sessions.Clear();
+        _active = null;
+    }
+
+    /// <summary>Ctrl+Tab — следующая вкладка, Ctrl+1…4 — конкретная.</summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (_sessions.Count > 0 && keyData.HasFlag(Keys.Control))
+        {
+            if (keyData == (Keys.Control | Keys.Tab))
+            {
+                var index = _active is null ? 0 : (_sessions.IndexOf(_active) + 1) % _sessions.Count;
+                ActivateIndex(index);
+                return true;
+            }
+
+            var digit = keyData & Keys.KeyCode;
+
+            if (digit is >= Keys.D1 and <= Keys.D4)
+            {
+                ActivateIndex(digit - Keys.D1);
+                return true;
+            }
+        }
+
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     protected override void OnFormClosed(FormClosedEventArgs e)

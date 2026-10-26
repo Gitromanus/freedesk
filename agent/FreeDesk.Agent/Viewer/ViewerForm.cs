@@ -113,11 +113,16 @@ public sealed class ViewerForm : ModernWindow
 
     private void BuildToolbar()
     {
-        _bar.BackColor = Ui.CardDeep;
+        _bar.BackColor = Ui.Card;
         _bar.Paint += (_, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var pen = new Pen(Ui.Line);
+
+            // тень + светлая кромка: полоса не теряется на тёмном удалённом экране
+            using var shadow = new Pen(Color.FromArgb(90, 0, 0, 0), 2f);
+            e.Graphics.DrawPath(shadow, Ui.RoundPath(new Rectangle(1, 2, _bar.Width - 3, _bar.Height - 3), 10));
+
+            using var pen = new Pen(Color.FromArgb(0x4C, 0x62, 0x86));
             using var path = Ui.RoundPath(new Rectangle(0, 0, _bar.Width - 1, _bar.Height - 1), 10);
             e.Graphics.DrawPath(pen, path);
         };
@@ -150,8 +155,10 @@ public sealed class ViewerForm : ModernWindow
         _expandBtn.Click += () => SetBarCollapsed(false);
         _mini.Controls.Add(_expandBtn);
 
-        Controls.Add(_bar);
-        Controls.Add(_mini);
+        // Панель живёт внутри канваса: он рисует видео, и только такой порядок
+        // гарантирует, что полоса всегда поверх картинки.
+        _canvas.Controls.Add(_bar);
+        _canvas.Controls.Add(_mini);
         _bar.BringToFront();
         _mini.BringToFront();
     }
@@ -217,14 +224,14 @@ public sealed class ViewerForm : ModernWindow
         x += _collapseBtn.Width + 6;
 
         _bar.Size = new Size(x, 34);
-        _bar.Location = new Point(Math.Max(0, (ClientSize.Width - _bar.Width) / 2), BarTop);
+        _bar.Location = new Point(Math.Max(0, (_canvas.ClientSize.Width - _bar.Width) / 2), BarTop);
 
         _bar.Region?.Dispose();
         _bar.Region = new Region(Ui.RoundPath(new Rectangle(0, 0, _bar.Width, _bar.Height), 10));
 
         // Язычок свёрнутого состояния — там же, где была полоса.
         _mini.Size = new Size(32, 24);
-        _mini.Location = new Point(Math.Max(0, (ClientSize.Width - _mini.Width) / 2), BarTop);
+        _mini.Location = new Point(Math.Max(0, (_canvas.ClientSize.Width - _mini.Width) / 2), BarTop);
         _expandBtn.Location = new Point(2, 1);
 
         _mini.Region?.Dispose();
