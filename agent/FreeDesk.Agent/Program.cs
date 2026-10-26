@@ -340,23 +340,32 @@ static void TryAttachParentConsole()
 
     static void ReopenStd(int handleId)
     {
-        var handle = Win32.GetStdHandle(handleId);
-        if (handle == IntPtr.Zero || handle == new IntPtr(-1))
+        // WinExe без консоли: handle может числиться установленным, но быть
+        // нерабочим — любой сбой здесь просто оставляет вывод без консоли.
+        try
         {
-            return;
-        }
+            var handle = Win32.GetStdHandle(handleId);
+            if (handle == IntPtr.Zero || handle == new IntPtr(-1))
+            {
+                return;
+            }
 
-        var safeHandle = new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, ownsHandle: false);
-        var stream = new FileStream(safeHandle, FileAccess.Write);
-        var writer = new StreamWriter(stream, Console.OutputEncoding) { AutoFlush = true };
+            var safeHandle = new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, ownsHandle: false);
+            var stream = new FileStream(safeHandle, FileAccess.Write);
+            var writer = new StreamWriter(stream, Console.OutputEncoding) { AutoFlush = true };
 
-        if (handleId == -11)
-        {
-            Console.SetOut(writer);
+            if (handleId == -11)
+            {
+                Console.SetOut(writer);
+            }
+            else
+            {
+                Console.SetError(writer);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            Console.SetError(writer);
+            Log.Warn($"консоль родителя недоступна: {ex.Message}");
         }
     }
 }
