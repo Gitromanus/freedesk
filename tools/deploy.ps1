@@ -21,6 +21,11 @@ Send (Join-Path $root 'server\public\.htaccess') "$site/public_html/.htaccess"
 Send (Join-Path $root 'server\public\test.html') "$site/public_html/test.html"
 Send (Join-Path $root 'server\public\diag.php') "$site/public_html/diag.php"
 
+# Лендинг: index.html отдаётся раньше index.php, скриншот лежит рядом.
+Write-Host 'uploading landing ...'
+Send (Join-Path $root 'site\index.html') "$site/public_html/index.html"
+Send (Join-Path $root 'site\app.png') "$site/public_html/app.png"
+
 Write-Host 'uploading app code ...'
 Send (Join-Path $root 'server\bootstrap.php') "$site/bootstrap.php"
 Send (Join-Path $root 'server\src') "$site/"

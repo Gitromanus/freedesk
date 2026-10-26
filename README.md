@@ -293,6 +293,20 @@ agent\publish\openh264.dll       кодек H.264 — обязательно р�
 8. **Ручная проверка:** открыть `https://fd.cherubino74.ru/test.html` в двух окнах,
    зарегистрировать оба, подключиться по ID одного из другого.
 
+### Сайт (лендинг)
+
+Статичная страница лежит в `site/`: `index.html` — сам лендинг (тёмная тема, дизайн-токены
+«ПРИЗМА»: градиентный акцент, стеклянные карточки, mono-подписи), `app.png` — скриншот окна.
+В `public_html` заливается как `index.html` и отдаётся раньше `index.php`; `deploy.ps1`
+кладёт оба файла сам. Содержимое сверено с этим README: цифры замеров, API, безопасность,
+ограничения и планы — без выдуманных возможностей.
+
+Обновить только страницу:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/ssh.ps1 -Action put -Local site/index.html -Remote /home/n/netesnl9/fd.cherubino74.ru/public_html/index.html
+```
+
 ### Деплой из Windows
 
 ```powershell
@@ -305,6 +319,10 @@ powershell -ExecutionPolicy Bypass -File tools/ssh.ps1 -Action run -Command "ls 
 # один файл
 powershell -ExecutionPolicy Bypass -File tools/ssh.ps1 -Action put -Local .\file -Remote /path/file
 ```
+
+Если штатный OpenSSH на машине молча падает (код 255 без вывода), есть то же самое на
+paramiko: `python tools/ssh.py run "ls -la"`, `python tools/ssh.py put <локально> <на сервере>`.
+Пароль берётся из переменной `FD_SSH_PASSWORD`.
 
 `tools/ssh.ps1` использует штатный OpenSSH + `tools/askpass.exe`, пароль берёт из
 `%TEMP%\fd_ssh_pass.txt`. Для cron-уборки на сервере: `php8.3 scripts/cleanup.php`.

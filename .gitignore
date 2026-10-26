@@ -16,3 +16,6 @@ agent/publish/
 Thumbs.db
 .idea/
 .vscode/
+
+# временные файлы отладки
+.tmp-*
