@@ -435,7 +435,6 @@ public sealed class MainForm : ModernWindow
 
         _hero.BackColor = Ui.Bg;
         _hero.Paint += DrawHero;
-        _hero.SendToBack();
 
         _viewerHost.BackColor = Ui.Bg;
         _viewerHost.Visible = false;
@@ -478,8 +477,7 @@ public sealed class MainForm : ModernWindow
         _hero.Bounds = new Rectangle(
             pad, top + pad,
             Math.Max(0, width - pad * 2), Math.Max(0, height - top - pad * 2));
-
-        Log.Info($"главная: полоска {_tabStrip.Bounds} видна={_tabStrip.Visible}, экран {_viewerHost.Bounds} виден={_viewerHost.Visible}");    }
+    }
 
     // ─────────── вкладки подключений ───────────
 
@@ -512,12 +510,17 @@ public sealed class MainForm : ModernWindow
             {
                 var isActive = ReferenceEquals(tab, _active);
 
-                // Дочерние формы (TopLevel=false) ненадёжно скрываются через Visible —
-                // прячем/показываем их окна явно, иначе на экране остаётся старое видео.
+                // Дочерние формы (TopLevel=false) прячем/показываем явно: через Visible
+                // они скрываются ненадёжно и на экране остаётся старое видео.
                 if (isActive)
                 {
-                    tab.View.Show();
-                    tab.View.BringToFront();
+                    // Show/BringToFront у дочерней формы требуют живого родителя:
+                    // без него WinForms бросает «not a child control of this parent».
+                    if (tab.View.Parent is not null)
+                    {
+                        tab.View.Show();
+                        tab.View.BringToFront();
+                    }
                 }
                 else
                 {
@@ -555,8 +558,11 @@ public sealed class MainForm : ModernWindow
 
         Log.Info($"вкладка активна: {tab.Title} ({FormatId(tab.Target)}), всего вкладок {_sessions.Count}");
 
-        tab.View?.BringToFront();
-        tab.View?.Focus();
+        if (tab.View?.Parent is not null)
+        {
+            tab.View.BringToFront();
+            tab.View.Focus();
+        }
 
         SetCaption("FreeDesk", $"· {tab.Title} · {FormatId(tab.Target)}");
 
