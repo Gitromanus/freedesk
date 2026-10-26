@@ -78,6 +78,27 @@ public static class Ui
             ?.SetValue(control, true);
     }
 
+    [DllImport("uxtheme.dll", CharSet = CharSet.Unicode)]
+    private static extern int SetWindowTheme(IntPtr hwnd, string subApp, string? subIdList);
+
+    /// <summary>Тёмный системный скроллбар — иначе в списке появляется светлая полоса не по стилю.</summary>
+    public static void ApplyDarkScrollbar(Control control)
+    {
+        if (!control.IsHandleCreated)
+        {
+            void Once(object? sender, EventArgs e)
+            {
+                control.HandleCreated -= Once;
+                SetWindowTheme(control.Handle, "DarkMode_Explorer", null);
+            }
+
+            control.HandleCreated += Once;
+            return;
+        }
+
+        SetWindowTheme(control.Handle, "DarkMode_Explorer", null);
+    }
+
     /// <summary>Кнопка-глиф для панели заголовка: свернуть/развернуть/закрыть.</summary>
     public static string Glyph(CaptionGlyph glyph)
     {
@@ -391,6 +412,18 @@ public abstract class ModernWindow : Form
                     return true;
                 }
             }
+            else if (m.Msg == WM_LBUTTONDOWN)
+            {
+                // Первый клик по неактивному окну Windows тратит на активацию —
+                // из-за этого вкладки и кнопки срабатывали со второго раза.
+                var target = Control.FromHandle(m.HWnd);
+
+                if (target is not null && ReferenceEquals(target.TopLevelControl, _owner) &&
+                    !_owner.ContainsFocus)
+                {
+                    _owner.Activate();
+                }
+            }
             else if (m.Msg == WM_MOUSEMOVE && _owner.IsResizing)
             {
                 _owner.ResizeTo(Cursor.Position);
@@ -617,17 +650,25 @@ public sealed class CaptionButton : Control
         base.OnMouseDown(e);
     }
 
-    protected override void OnMouseUp(MouseEventArgs e)
-    {
-        _pressed = false;
-        Invalidate();
-        base.OnMouseUp(e);
-    }
-
     protected override void OnClick(EventArgs e)
     {
+        // Своё событие поднимаем сами в OnMouseUp: иначе клик по неактивному окну
+        // (первый клик — на активацию) теряется.
         base.OnClick(e);
-        Click?.Invoke();
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        var wasPressed = _pressed;
+        _pressed = false;
+        Invalidate();
+
+        if (e.Button == MouseButtons.Left && (wasPressed || ClientRectangle.Contains(e.Location)))
+        {
+            Click?.Invoke();
+        }
+
+        base.OnMouseUp(e);
     }
 
     protected override void OnPaint(PaintEventArgs e)

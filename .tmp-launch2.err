@@ -1,0 +1,12 @@
+я╗┐Add-Type : c:\Users\User\AppData\Local\Temp\hyvjabgm.0.cs(11) : Предупреждение, обрабатываемое как ошибка: Переменной "
+bestW" присвоено значение, но оно ни разу не использовалось
+c:\Users\User\AppData\Local\Temp\hyvjabgm.0.cs(10) :   public static IntPtr Find(uint pid) {
+c:\Users\User\AppData\Local\Temp\hyvjabgm.0.cs(11) : >>>     IntPtr best = IntPtr.Zero; int bestW = 0;
+c:\Users\User\AppData\Local\Temp\hyvjabgm.0.cs(12) :     EnumWindows((h, l) => {
+C:\Users\User\Desktop\freedesk\.tmp-launch2.ps1:62 знак:1
++ Add-Type -TypeDefinition @'
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (Microsoft.Power...peCompilerError:AddTypeCompilerError) [Add-Type], Except 
+   ion
+    + FullyQualifiedErrorId : SOURCE_CODE_ERROR,Microsoft.PowerShell.Commands.AddTypeCommand
+ 

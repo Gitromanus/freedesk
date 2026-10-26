@@ -116,7 +116,6 @@ public sealed class TabChip : Control
 
     private bool _hover;
     private bool _hoverClose;
-    private bool _pressed;
 
     public event Action? Activated;
     public event Action? Closed;
@@ -147,7 +146,7 @@ public sealed class TabChip : Control
         return Math.Clamp(width, 126, 250);
     }
 
-    private Rectangle CloseRect => new(Width - 26, 5, 20, 20);
+    private Rectangle CloseRect => new(Width - 32, 3, 26, 24);
 
     protected override void OnMouseEnter(EventArgs e)
     {
@@ -161,7 +160,6 @@ public sealed class TabChip : Control
         base.OnMouseLeave(e);
         _hover = false;
         _hoverClose = false;
-        _pressed = false;
         Cursor = Cursors.Hand;
         Invalidate();
     }
@@ -184,28 +182,27 @@ public sealed class TabChip : Control
     {
         base.OnMouseDown(e);
 
-        if (e.Button != MouseButtons.Left)
+        if (e.Button == MouseButtons.Left)
         {
-            return;
+            Invalidate();
         }
-
-        _pressed = true;
-        Invalidate();
     }
 
     protected override void OnMouseUp(MouseEventArgs e)
     {
         base.OnMouseUp(e);
 
-        if (e.Button != MouseButtons.Left || !_pressed)
+        if (e.Button != MouseButtons.Left)
         {
             return;
         }
 
-        _pressed = false;
-        Invalidate();
-
         Log.Info($"вкладка: клик «{_title}» в {(CloseRect.Contains(e.Location) ? "крестик" : "тело")}");
+
+        if (!ClientRectangle.Contains(e.Location))
+        {
+            return;
+        }
 
         if (!_isPlus && CloseRect.Contains(e.Location))
         {
@@ -267,7 +264,7 @@ public sealed class TabChip : Control
         }
 
         var textLeft = 26;
-        var textWidth = Width - 26 - 30;
+        var textWidth = Width - 26 - 36;
         var hasSubtitle = !string.IsNullOrWhiteSpace(_subtitle);
 
         if (hasSubtitle)

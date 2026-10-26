@@ -34,6 +34,8 @@ public sealed class MainForm : ModernWindow
     private readonly UiInput _targetInput = new("9-значный ID");
     private readonly UiButton _connectBtn = new("Подключиться");
     private readonly ListBox _recentList = new();
+    private readonly DoubleBufferedPanel _recentRail = new();
+    private readonly System.Windows.Forms.Timer _recentRailTimer = new();
     private readonly Label _recentEmpty = new();
     private readonly CaptionButton _collapseBtn = new(CaptionGlyph.ChevronLeft);
     private readonly CaptionButton _settingsBtn = new(CaptionGlyph.Settings);
@@ -197,7 +199,10 @@ public sealed class MainForm : ModernWindow
         _recentList.BackColor = Ui.CardDeep;
         _recentList.ForeColor = Ui.Ink;
         _recentList.Location = new Point(x, y);
-        _recentList.Size = new Size(w, 100);
+
+        // Нативный скроллбар уводим за правый край панели: он светлый и ломает тему.
+        // Свой тонкий ползунок рисуем сами поверх списка.
+        _recentList.Size = new Size(w + SystemInformation.VerticalScrollBarWidth, 100);
         _recentList.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Bottom;
         _recentList.DrawItem += DrawRecentItem;
         _recentList.MouseDoubleClick += (_, _) => ConnectSelected();
@@ -205,6 +210,15 @@ public sealed class MainForm : ModernWindow
         _recentList.MouseLeave += (_, _) => SetHoveredRecent(-1);
         _recentList.MouseDown += OnRecentMouseDown;
         Ui.EnableDoubleBuffer(_recentList);
+
+        _recentRail.Width = 4;
+        _recentRail.BackColor = Ui.CardDeep;
+        _recentRail.Visible = false;
+        _recentRail.Paint += DrawRecentRail;
+
+        _recentRailTimer.Interval = 150;
+        _recentRailTimer.Tick += (_, _) => DrawRecentRailNow();
+        _recentRailTimer.Start();
 
         _recentEmpty.Text = "Здесь появятся устройства,\nк которым вы подключались";
         _recentEmpty.Font = new Font("Segoe UI", 9f);
@@ -243,16 +257,26 @@ public sealed class MainForm : ModernWindow
             }
 
             _recentList.Height = Math.Max(48, _sidebar.Height - _recentList.Top - 20);
+            _recentList.Width = Math.Max(120, _sidebar.Width - _recentList.Left + SystemInformation.VerticalScrollBarWidth);
             _recentEmpty.Visible = !_sidebarCollapsed && _recentList.Items.Count == 0;
+
+            _recentRail.Bounds = new Rectangle(
+                _recentList.Left + w - 6,
+                _recentList.Top + 4,
+                4,
+                Math.Max(20, _recentList.Height - 8));
         };
 
         _sidebar.Controls.AddRange(new Control[]
         {
             idCaption, _idLabel, idHint, _statusText,
             _targetInput, _connectBtn,
-            _recentList, _recentEmpty, _collapseBtn, _settingsBtn,
+            _recentList, _recentEmpty, _collapseBtn, _settingsBtn, _recentRail,
         });
         _sidebar.BringToFront();
+
+        // ползунок должен быть поверх списка, иначе его закрашивает сам список
+        _recentRail.BringToFront();
 
         Label Caption(string text, int top) => new()
         {
@@ -354,19 +378,61 @@ public sealed class MainForm : ModernWindow
         if (index < 0) return;
 
         var row = _recentList.GetItemRectangle(index);
+        var rowRight = row.Right - SystemInformation.VerticalScrollBarWidth;
 
         // значки действий в правой части строки: [✎][✕]
-        if (e.X >= row.Right - 68 && e.X < row.Right - 40)
+        if (e.X >= rowRight - 68 && e.X < rowRight - 40)
         {
             _recentList.SelectedIndex = index;
             RenameSelected();
             return;
         }
 
-        if (e.X >= row.Right - 40)
+        if (e.X >= rowRight - 40)
         {
             _recentList.SelectedIndex = index;
             RemoveSelected();
+        }
+    }
+
+    /// <summary>Тонкий ползунок списка последних: сам список прокручивается колесом, а полоса — своя, в теме.</summary>
+    private void DrawRecentRail(object? sender, PaintEventArgs e)
+    {
+        var g = e.Graphics;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        var content = _recentList.Items.Count * _recentList.ItemHeight;
+        var view = Math.Max(1, _recentList.ClientSize.Height);
+
+        if (content <= view)
+        {
+            return;
+        }
+
+        var track = _recentRail.ClientSize.Height;
+        var thumb = Math.Max(26, (int)((long)track * view / content));
+        var max = Math.Max(1, content - view);
+        var offset = Math.Min(_recentList.TopIndex * _recentList.ItemHeight, max);
+        var top = (int)((long)(track - thumb) * offset / max);
+
+        using var path = Ui.RoundPath(new Rectangle(0, top, _recentRail.Width, thumb), 2);
+        using var brush = new SolidBrush(Color.FromArgb(0x5A, 0x6C, 0x86));
+        g.FillPath(brush, path);
+    }
+
+    private void DrawRecentRailNow()
+    {
+        var content = _recentList.Items.Count * _recentList.ItemHeight;
+        var need = !_sidebarCollapsed && content > _recentList.ClientSize.Height;
+
+        if (_recentRail.Visible != need)
+        {
+            _recentRail.Visible = need;
+        }
+
+        if (need)
+        {
+            _recentRail.Invalidate();
         }
     }
 
@@ -380,6 +446,10 @@ public sealed class MainForm : ModernWindow
         g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
         var active = e.Index == _hoveredRecent || (e.State & DrawItemState.Selected) != 0;
+
+        // скроллбар уведён за край: последние 17 px всегда оставляем под него,
+        // иначе последняя цифра ID уезжает под обрез
+        var right = e.Bounds.Right - SystemInformation.VerticalScrollBarWidth;
 
         if (active)
         {
@@ -402,11 +472,14 @@ public sealed class MainForm : ModernWindow
         // обе надписи центрированы по вертикали строки; под ID отведено 84px,
         // чтобы «248 292 610» (Consolas) влезал целиком
         TextRenderer.DrawText(g, name, nameFont,
-            new Rectangle(e.Bounds.X + 22, e.Bounds.Y, e.Bounds.Width - 22 - 130, e.Bounds.Height),
+            new Rectangle(e.Bounds.X + 22, e.Bounds.Y, right - e.Bounds.X - 22 - 150, e.Bounds.Height),
             Ui.Ink, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 
+        // Ширина под ID считается по тексту: у «573 348 635» в Consolas не влезало в 84px
+        var idWidth = TextRenderer.MeasureText(FormatId(entry.Id), idFont).Width + 6;
+
         TextRenderer.DrawText(g, FormatId(entry.Id), idFont,
-            new Rectangle(e.Bounds.Right - 152, e.Bounds.Y, 84, e.Bounds.Height),
+            new Rectangle(right - 172, e.Bounds.Y, Math.Max(84, idWidth), e.Bounds.Height),
             Ui.Muted, TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
 
         // значки «изменить» и «удалить» видны только на активной строке
@@ -416,11 +489,11 @@ public sealed class MainForm : ModernWindow
             using var iconBrush = new SolidBrush(Ui.Muted);
 
             TextRenderer.DrawText(g, Ui.Glyph(CaptionGlyph.Edit), iconFont,
-                new Rectangle(e.Bounds.Right - 68, e.Bounds.Y, 28, e.Bounds.Height),
+                new Rectangle(right - 68, e.Bounds.Y, 28, e.Bounds.Height),
                 Ui.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
             TextRenderer.DrawText(g, Ui.Glyph(CaptionGlyph.Delete), iconFont,
-                new Rectangle(e.Bounds.Right - 40, e.Bounds.Y, 28, e.Bounds.Height),
+                new Rectangle(right - 40, e.Bounds.Y, 28, e.Bounds.Height),
                 Ui.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
     }
@@ -592,19 +665,17 @@ public sealed class MainForm : ModernWindow
         {
             if (tab.View is not null)
             {
-                tab.View.Visible = false;
+                tab.View.Hide();
             }
         }
 
         SetCaption("FreeDesk");
 
-        if (_sidebarCollapsed)
+        // панель не трогаем: её разворачивает только шеврон на ней
+        if (!_sidebarCollapsed)
         {
-            _collapsedForSession = false;
-            ToggleSidebar();
+            _targetInput.Box.Focus();
         }
-
-        _targetInput.Box.Focus();
     }
 
     private void CloseTabAt(int index)
