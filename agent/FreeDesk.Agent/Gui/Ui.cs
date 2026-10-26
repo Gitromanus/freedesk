@@ -188,6 +188,8 @@ public abstract class ModernWindow : Form
         BackColor = Ui.Bg;
         Font = new Font("Segoe UI", 9.75f);
         KeyPreview = true;
+
+        _resizeFilter = new ResizeFilter(this);
     }
 
     /// <summary>Заголовок: «{title} {suffix}», suffix рисуется приглушённым.</summary>
@@ -233,6 +235,8 @@ public abstract class ModernWindow : Form
         WindowState = WindowState == FormWindowState.Maximized
             ? FormWindowState.Normal
             : FormWindowState.Maximized;
+
+        Log.Info($"окно: {WindowState} {Bounds.Width}x{Bounds.Height}");
     }
 
     private void LayoutCaptionButtons()
@@ -266,6 +270,7 @@ public abstract class ModernWindow : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
+        Application.AddMessageFilter(_resizeFilter);
 
         // Скруглённые углы Win11; на Win10 атрибут игнорируется — останутся прямые.
         var preference = 2; // DWMWCP_ROUND
@@ -324,32 +329,104 @@ public abstract class ModernWindow : Form
             Math.Max(0, area.Width - 2), Math.Max(0, area.Height - 2));
     }
 
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
+    private int _resizeEdge;
+    private bool _resizing;
+    private Point _resizeStartCursor;
+    private Rectangle _resizeStartBounds;
+    private readonly ResizeFilter _resizeFilter;
 
-            // Без WS_THICKFRAME система игнорирует HTLEFT/HTRIGHT из WM_NCHITTEST —
-            // окно нельзя растянуть мышью. Рамку убираем через WM_NCCALCSIZE.
-            cp.Style |= 0x00040000; // WS_THICKFRAME
-            cp.Style |= 0x00020000; // WS_MINIMIZEBOX
-            cp.Style |= 0x00010000; // WS_MAXIMIZEBOX
-            return cp;
+    /// <summary>Тянем ли окно за кромку прямо сейчас.</summary>
+    internal bool IsResizing => _resizing;
+
+    internal void BeginResize(int edge)
+    {
+        _resizeEdge = edge;
+        _resizing = true;
+        _resizeStartCursor = Cursor.Position;
+        _resizeStartBounds = Bounds;
+        Capture = true;
+    }
+
+    internal void EndResize()
+    {
+        _resizing = false;
+        _resizeEdge = 0;
+        Capture = false;
+    }
+
+    /// <summary>
+    /// Фильтр сообщений: клики по кромке уходят дочерним панелям (canvas, сайдбар),
+    /// поэтому ловим их до того, как они дойдут до контролов.
+    /// </summary>
+    private sealed class ResizeFilter : IMessageFilter
+    {
+        private readonly ModernWindow _owner;
+        private int _lastCursorEdge = -1;
+
+        public ResizeFilter(ModernWindow owner) => _owner = owner;
+
+        public bool PreFilterMessage(ref Message m)
+        {
+            const int WM_LBUTTONDOWN = 0x201;
+            const int WM_MOUSEMOVE = 0x200;
+            const int WM_LBUTTONUP = 0x202;
+
+            if (_owner.IsDisposed || !_owner.IsHandleCreated)
+            {
+                return false;
+            }
+
+            if (m.Msg == WM_LBUTTONDOWN && _owner.WindowState == FormWindowState.Normal)
+            {
+                if (!_owner.Bounds.Contains(Cursor.Position))
+                {
+                    return false;
+                }
+
+                var edge = _owner.EdgeAt(_owner.PointToClient(Cursor.Position));
+
+                if (edge != 0)
+                {
+                    _owner.BeginResize(edge);
+                    return true;
+                }
+            }
+            else if (m.Msg == WM_MOUSEMOVE && _owner.IsResizing)
+            {
+                _owner.ResizeTo(Cursor.Position);
+                return true;
+            }
+            else if (m.Msg == WM_MOUSEMOVE)
+            {
+                // Курсор-стрелки на кромках: сообщения о мыши получают дочерние
+                // контролы, поэтому ставим курсор здесь.
+                var edge = _owner.WindowState == FormWindowState.Maximized ||
+                           !_owner.Bounds.Contains(Cursor.Position)
+                    ? 0
+                    : _owner.EdgeAt(_owner.PointToClient(Cursor.Position));
+
+                if (edge != _lastCursorEdge)
+                {
+                    _lastCursorEdge = edge;
+                    Cursor.Current = CursorForEdge(edge);
+                }
+            }
+            else if (m.Msg == WM_LBUTTONUP && _owner.IsResizing)
+            {
+                _owner.EndResize();
+                return true;
+            }
+
+            return false;
         }
     }
 
     protected override void WndProc(ref Message m)
     {
         const int WM_NCHITTEST = 0x84;
-        const int WM_NCCALCSIZE = 0x83;
 
-        if (m.Msg == WM_NCCALCSIZE && m.WParam != IntPtr.Zero)
-        {
-            // Клиентская область = всё окно: заголовок и рамку рисуем сами.
-            m.Result = IntPtr.Zero;
-            return;
-        }
+        // Растягивание, курсор и захват кромок — в ResizeFilter: сюда клики по кромке
+        // не доходят, их получают дочерние панели.
 
         if (m.Msg == WM_NCHITTEST)
         {
@@ -358,30 +435,11 @@ public abstract class ModernWindow : Form
             var screenPoint = new Point((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF));
             var p = PointToClient(screenPoint);
 
-            var maximized = WindowState == FormWindowState.Maximized;
-
-            if (!maximized)
+            // Кромки не отдаём системе (нет WS_THICKFRAME) — растягиваем сами.
+            if (WindowState != FormWindowState.Maximized && EdgeAt(p) != 0)
             {
-                var left = p.X <= EdgeSize;
-                var right = p.X >= ClientSize.Width - EdgeSize;
-                var top = p.Y <= EdgeSize;
-                var bottom = p.Y >= ClientSize.Height - EdgeSize;
-
-                var code = HTCLIENT;
-                if (left && top) code = HTTOPLEFT;
-                else if (right && top) code = HTTOPRIGHT;
-                else if (left && bottom) code = HTBOTTOMLEFT;
-                else if (right && bottom) code = HTBOTTOMRIGHT;
-                else if (left) code = HTLEFT;
-                else if (right) code = HTRIGHT;
-                else if (top) code = HTTOP;
-                else if (bottom) code = HTBOTTOM;
-
-                if (code != HTCLIENT)
-                {
-                    m.Result = (IntPtr)code;
-                    return;
-                }
+                m.Result = (IntPtr)HTCLIENT;
+                return;
             }
 
             if (p.Y < CaptionHeight && p.X >= 0 && p.X < ClientSize.Width)
@@ -392,6 +450,69 @@ public abstract class ModernWindow : Form
         }
 
         base.WndProc(ref m);
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        Application.RemoveMessageFilter(_resizeFilter);
+        base.OnHandleDestroyed(e);
+    }
+
+    /// <summary>Какая кромка/угол окна под точкой (битовая маска 1=лево, 2=право, 4=верх, 8=низ).</summary>
+    private int EdgeAt(Point p)
+    {
+        var edge = 0;
+
+        if (p.X <= EdgeSize) edge |= 1;
+        else if (p.X >= ClientSize.Width - EdgeSize) edge |= 2;
+
+        if (p.Y <= EdgeSize) edge |= 4;
+        else if (p.Y >= ClientSize.Height - EdgeSize) edge |= 8;
+
+        return edge;
+    }
+
+    private static Cursor CursorForEdge(int edge) => edge switch
+    {
+        1 or 2 => Cursors.SizeWE,
+        4 or 8 => Cursors.SizeNS,
+        5 or 10 => Cursors.SizeNWSE,
+        6 or 9 => Cursors.SizeNESW,
+        _ => Cursors.Default,
+    };
+
+    /// <summary>Ручное растягивание безрамочного окна за кромки/углы.</summary>
+    private void ResizeTo(Point cursor)
+    {
+        var dx = cursor.X - _resizeStartCursor.X;
+        var dy = cursor.Y - _resizeStartCursor.Y;
+
+        var left = _resizeStartBounds.Left;
+        var top = _resizeStartBounds.Top;
+        var right = _resizeStartBounds.Right;
+        var bottom = _resizeStartBounds.Bottom;
+
+        if ((_resizeEdge & 1) != 0) left += dx;
+        if ((_resizeEdge & 2) != 0) right += dx;
+        if ((_resizeEdge & 4) != 0) top += dy;
+        if ((_resizeEdge & 8) != 0) bottom += dy;
+
+        var minWidth = Math.Max(320, MinimumSize.Width);
+        var minHeight = Math.Max(220, MinimumSize.Height);
+
+        if (right - left < minWidth)
+        {
+            if ((_resizeEdge & 1) != 0) left = right - minWidth;
+            else right = left + minWidth;
+        }
+
+        if (bottom - top < minHeight)
+        {
+            if ((_resizeEdge & 4) != 0) top = bottom - minHeight;
+            else bottom = top + minHeight;
+        }
+
+        Bounds = new Rectangle(left, top, right - left, bottom - top);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -472,8 +593,7 @@ public sealed class CaptionButton : Control
     public new event Action? Click;
 
     protected override void OnMouseEnter(EventArgs e)
-    {
-        _hover = true;
+    {        _hover = true;
         Invalidate();
         base.OnMouseEnter(e);
     }

@@ -628,22 +628,34 @@ public sealed class MainForm : ModernWindow
         _targetInput.Box.ReadOnly = true;
         SetStatus("Подключение…", Ui.Amber);
 
+        var lastStatus = "";
+
         try
         {
             Disconnect(keepStatus: true);
-
             _session = new ViewerSession(_client, target, VideoCodecNames.Parse(_config.Codec), null, _config);
+            var session = _session;
 
             // Пароль спрашиваем у главного окна: встроенное окно просмотра ещё не создано
             // и не может быть владельцем модального диалога.
-            _session.PasswordPrompt = () =>
+            session.PasswordPrompt = () =>
                 PromptDialog.AskPasswordAsync(this, $"Устройство {FormatId(target)}");
 
             var connected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _session.Connected += () => connected.TrySetResult(true);
-            _session.StatusChanged += text => SetStatus(text, Ui.Amber);
-            _session.Ended += OnUiSessionEnded;
-            _session.Start();
+            lastStatus = "";
+
+            session.Connected += () => connected.TrySetResult(true);
+            session.StatusChanged += text =>
+            {
+                lastStatus = text;
+                SetStatus(text, Ui.Amber);
+            };
+
+            // Сессия может закончиться до соединения (неверный ID, отказ, обрыв):
+            // будить ожидание сразу, а не ждать 90 секунд.
+            session.Ended += () => connected.TrySetResult(false);
+            session.Ended += () => OnUiSessionEnded(session);
+            session.Start();
 
             // 90 с: хост даёт 60 с на ввод пароля, плюс запас на сам ввод
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
@@ -651,7 +663,9 @@ public sealed class MainForm : ModernWindow
             {
                 if (!await connected.Task)
                 {
-                    throw new TimeoutException("не дождались соединения");
+                    throw new InvalidOperationException(string.IsNullOrWhiteSpace(lastStatus)
+                        ? "не дождались соединения"
+                        : lastStatus);
                 }
             }
 
@@ -678,13 +692,12 @@ public sealed class MainForm : ModernWindow
         {
             if (_session is not null)
             {
-                _session.Ended -= OnUiSessionEnded;
                 var failed = _session;
                 _session = null;
                 await failed.DisposeAsync();
             }
 
-            SetStatus("Ошибка: " + ex.Message, Ui.Red);
+            SetStatus(CleanReason(string.IsNullOrWhiteSpace(lastStatus) ? ex.Message : lastStatus), Ui.Red);
         }
         finally
         {
@@ -692,6 +705,24 @@ public sealed class MainForm : ModernWindow
             _connectBtn.Enabled = true;
             _targetInput.Box.ReadOnly = false;
         }
+    }
+
+    /// <summary>Причина сбоя без служебного префикса и с большой буквы.</summary>
+    private static string CleanReason(string text)
+    {
+        var reason = (text ?? "").Trim();
+
+        if (reason.StartsWith("ошибка:", StringComparison.OrdinalIgnoreCase))
+        {
+            reason = reason[7..].Trim();
+        }
+
+        if (reason.Length == 0)
+        {
+            return "не удалось подключиться";
+        }
+
+        return char.ToUpper(reason[0], System.Globalization.CultureInfo.CurrentCulture) + reason[1..];
     }
 
     private void ConnectSelected()
@@ -741,8 +772,7 @@ public sealed class MainForm : ModernWindow
 
     private void OnSessionEnded()
     {
-        _session = null;
-        SetCaption("FreeDesk");
+        _session = null;        SetCaption("FreeDesk");
         _mainArea.Padding = new Padding(24);
 
         if (_viewerForm is not null)
@@ -771,7 +801,6 @@ public sealed class MainForm : ModernWindow
 
         if (_session is not null)
         {
-            _session.Ended -= OnUiSessionEnded;
             var session = _session;
             _session = null;
             _ = session.DisposeAsync();
@@ -785,8 +814,15 @@ public sealed class MainForm : ModernWindow
         }
     }
 
-    private void OnUiSessionEnded() => BeginInvoke(() =>
+    private void OnUiSessionEnded(ViewerSession ended) => BeginInvoke(() =>
     {
+        // Пока шло подключение, экраном и сообщением об ошибке заведует ConnectAsync.
+        // И сессия могла уже быть заменена новой — тогда это её событие, не наше.
+        if (_connecting || !ReferenceEquals(_session, ended))
+        {
+            return;
+        }
+
         // связь оборвалась сама — пробуем вернуть, пока не исчерпаны попытки
         if (!_userDisconnected && _viewerForm is not null && _lastTarget is not null &&
             _reconnectAttempts < 3 && !_cts.IsCancellationRequested)

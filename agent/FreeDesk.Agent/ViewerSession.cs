@@ -137,6 +137,22 @@ public sealed class ViewerSession : IAsyncDisposable
         catch (OperationCanceledException)
         {
         }
+        catch (ApiException ex)
+        {
+            // Технические коды сервера — в понятные человеку причины.
+            var reason = ex.Code switch
+            {
+                "not_found" => "устройство не найдено",
+                "offline" => "устройство не в сети",
+                "busy" => "устройство занято",
+                "unauthorized" or "forbidden" => "сервер отклонил запрос",
+                _ => "сервер: " + ex.Message,
+            };
+
+            StatusChanged?.Invoke("ошибка: " + reason);
+            Log.Error(ex.Message);
+            Ended?.Invoke();
+        }
         catch (Exception ex)
         {
             StatusChanged?.Invoke("ошибка: " + ex.Message);
