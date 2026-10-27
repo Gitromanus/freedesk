@@ -116,6 +116,25 @@
   }
   .toast.on{opacity:1}
   .kbd{position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0}
+
+  /* диалог пароля */
+  .ask{
+    position:fixed; inset:0; z-index:30; display:flex; align-items:center; justify-content:center;
+    padding:24px 18px; background:rgba(4,6,12,.72); backdrop-filter:blur(6px);
+  }
+  .ask[hidden]{display:none}
+  .ask .card{max-width:380px}
+  .ask h1{font-size:19px; margin-bottom:6px}
+  .ask .hint{margin-bottom:14px}
+  .ask .field{margin-bottom:14px}
+
+  /* подсказка поверх экрана */
+  .banner{
+    position:absolute; left:10px; right:10px; top:calc(58px + env(safe-area-inset-top)); z-index:5;
+    display:none; padding:10px 14px; border-radius:12px; font-size:12.5px; line-height:1.45;
+    background:rgba(120,53,15,.92); border:1px solid rgba(251,191,36,.45); color:#fde68a;
+  }
+  .banner.on{display:block}
   @media (min-width:760px){
     .stage video{object-fit:contain}
   }
@@ -165,6 +184,8 @@
     <button class="icon" id="menuBtn" aria-label="Меню">⋯</button>
   </div>
 
+  <div class="banner" id="banner"></div>
+
   <div class="sheet" id="sheet">
     <button class="btn btn--ghost" id="kbBtn">Клавиатура</button>
     <button class="btn btn--ghost" id="textBtn">Вставить текст</button>
@@ -175,6 +196,20 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<!-- запрос пароля устройства: свой диалог вместо системного prompt -->
+<div class="ask" id="ask" hidden>
+  <div class="card">
+    <h1>Пароль устройства</h1>
+    <p class="hint">На компьютере задан пароль для входа без подтверждения. Введите его — или нажмите «Отмена».</p>
+    <div class="field">
+      <input id="askPass" type="password" autocomplete="off" placeholder="пароль устройства">
+    </div>
+    <button class="btn" id="askOk">Подключиться</button>
+    <button class="btn btn--ghost" id="askCancel" style="margin-top:10px">Отмена</button>
+    <p class="hint" style="margin:12px 0 0; font-size:12px">Если пароль забыт — на компьютере откройте настройки FreeDesk и сбросьте его: старый вводить не нужно.</p>
+  </div>
+</div>
 <input class="kbd" id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
 
 <script>
@@ -216,12 +251,46 @@ function note(text) {
   state.log.push(new Date().toISOString().slice(11, 19) + ' ' + text);
   if (state.log.length > 60) state.log.shift();
 }
-function toast(text, ms = 2200) {
-  const el = $('toast');
+function toast(text, ms = 2200) {  const el = $('toast');
   el.textContent = text;
   el.classList.add('on');
   clearTimeout(el._t);
   el._t = setTimeout(() => el.classList.remove('on'), ms);
+}
+
+// ─────────── диалог пароля ───────────
+let askResolve = null;
+
+function askPassword() {
+  return new Promise((resolve) => {
+    askResolve = resolve;
+    $('askPass').value = '';
+    $('ask').hidden = false;
+    setTimeout(() => $('askPass').focus(), 50);
+  });
+}
+
+function closeAsk(value) {
+  $('ask').hidden = true;
+  const resolve = askResolve;
+  askResolve = null;
+  if (resolve) resolve(value);
+}
+
+$('askOk').onclick = () => closeAsk($('askPass').value || null);
+$('askCancel').onclick = () => closeAsk(null);
+$('askPass').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') closeAsk($('askPass').value || null);
+});
+
+function banner(text) {
+  const el = $('banner');
+  el.textContent = text;
+  el.classList.add('on');
+}
+
+function hideBanner() {
+  $('banner').classList.remove('on');
 }
 
 function fmtId(id) {
@@ -352,7 +421,7 @@ async function startOffer(target) {
   const dc = pc.createDataChannel('freedesk', { ordered: true });
   state.dc = dc;
   dc.binaryType = 'arraybuffer';
-  dc.onopen = () => { setDot('ok'); requestKeyframe(); };
+  dc.onopen = () => { setDot('ok'); requestKeyframe(); startFrameWatch(); };
   dc.onclose = () => setDot('warn');
   dc.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) onFramePacket(ev.data); };
 
@@ -701,6 +770,7 @@ async function connect() {
     setDot('warn');
 
     toast('заявка отправлена, ждём подтверждения', 3000);
+    banner('Подтвердите подключение на компьютере — на его экране появится окно. Если у устройства задан пароль, подтверждение не нужно.');
     startLoop();
   } catch (e) {
     button.disabled = false;
@@ -774,13 +844,15 @@ async function handleSignal(msg) {
 
   switch (msg.type) {
     case 'challenge': {
-      const password = state.password || window.prompt('Пароль устройства') || '';
-      state.password = password;
+      const password = state.password || await askPassword();
 
       if (!password) {
-        toast('без пароля не подключиться');
+        toast('без пароля не подключиться', 2600);
+        endSession(true);
         return;
       }
+
+      state.password = password;
 
       try {
         const proof = await makeProof(password, payload.salt, payload.iterations, payload.nonce);
@@ -826,6 +898,17 @@ async function handleSignal(msg) {
   }
 }
 
+function startFrameWatch() {
+  hideBanner();
+
+  clearTimeout(startFrameWatch._t);
+  startFrameWatch._t = setTimeout(() => {
+    if (!state.sid || frameCount > 0) return;
+
+    banner('Кадры не приходят. Обычно это старая версия FreeDesk на компьютере — скачайте свежую с сайта. Если версия новая, нажмите «Обновить кадр» в меню.');
+  }, 12000);
+}
+
 async function endSession(sendEnd) {
   stopLoop();
 
@@ -843,6 +926,8 @@ async function endSession(sendEnd) {
 
   frameW = 0; frameH = 0; frameCount = 0;
   pendingFrame = null;
+  hideBanner();
+  closeAsk(null);
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   $('stage').classList.remove('on');

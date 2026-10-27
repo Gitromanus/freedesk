@@ -18,7 +18,6 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiInput _bitrateInput = new("3000");
     private readonly UiInput _widthInput = new("1920");
     private readonly UiInput _passwordInput = new("не задан");
-    private readonly UiInput _currentPasswordInput = new("текущий пароль");
     private readonly UiButton _clearPasswordBtn = new("Сбросить пароль") { Ghost = true, Radius = 10 };
     private readonly UiToggle _trayToggle = new("Сворачивать в трей\nпри закрытии окна");
     private readonly UiToggle _autostartToggle = new("Запускать при входе\nв Windows");
@@ -107,6 +106,8 @@ public sealed class SettingsDialog : ModernWindow
         _widthInput.InputText = config.MaxWidth.ToString();
 
         // Пароль храним только хешем: показать текущий нельзя, только задать новый.
+        // Менять и сбрасывать его вправе только тот, кто сидит за этой машиной
+        // (зритель такого канала не имеет вообще), поэтому текущий пароль не спрашиваем.
         _passwordInput.Box.UseSystemPasswordChar = true;
         _passwordInput.Box.PlaceholderText = config.HasUnattendedPassword
             ? "задан — введите новый, чтобы сменить"
@@ -114,12 +115,21 @@ public sealed class SettingsDialog : ModernWindow
 
         y = AddField("ПАРОЛЬ ДЛЯ ДОСТУПА БЕЗ ПОДТВЕРЖДЕНИЯ", _passwordInput, y) + 2;
 
-        // Смена/сброс — только со знанием текущего пароля: зритель, оставшийся
-        // за машиной без владельца, не сможет скрыто завладеть доступом.
         if (config.HasUnattendedPassword)
         {
-            _currentPasswordInput.Box.UseSystemPasswordChar = true;
-            y = AddField("ТЕКУЩИЙ ПАРОЛЬ (ДЛЯ СМЕНЫ ИЛИ СБРОСА)", _currentPasswordInput, y) + 2;
+            var note = new Label
+            {
+                Text = "Пароль можно сменить или сбросить здесь без старого: доступ к настройкам = доступ к машине.",
+                Font = new Font("Segoe UI", 8.25f),
+                ForeColor = Ui.Muted,
+                BackColor = Ui.Card,
+                AutoSize = false,
+                Location = new Point(x, y),
+                Size = new Size(Math.Max(200, Width - 56), 30),
+            };
+
+            _content.Controls.Add(note);
+            y += 34;
         }
 
         _clearPasswordBtn.Location = new Point(x, y);
@@ -127,6 +137,18 @@ public sealed class SettingsDialog : ModernWindow
         _clearPasswordBtn.Enabled = config.HasUnattendedPassword;
         _clearPasswordBtn.Click += (_, _) =>
         {
+            var ok = MessageBox.Show(
+                this,
+                "Сбросить пароль? Подключения к этой машине будут требовать подтверждения вручную.",
+                "FreeDesk",
+                MessageBoxButtons.OKCancel,
+                MessageBoxIcon.Question) == DialogResult.OK;
+
+            if (!ok)
+            {
+                return;
+            }
+
             _clearPassword = true;
             _passwordInput.InputText = "";
             _clearPasswordBtn.Text = "пароль будет сброшен";
@@ -279,18 +301,8 @@ public sealed class SettingsDialog : ModernWindow
             return false;
         }
 
-        // смена/сброс — только со знанием текущего пароля устройства
-        var changingPassword = _clearPassword || newPassword.Length > 0;
-        if (changingPassword && _config.HasUnattendedPassword)
-        {
-            var current = _config.GetUnattendedSecret();
-            if (current is null || !UnattendedAuth.MatchesStored(_currentPasswordInput.InputText, current))
-            {
-                Flash("смена/сброс пароля требуют текущий пароль устройства");
-                _currentPasswordInput.Box.Focus();
-                return false;
-            }
-        }
+        // Смена и сброс доступны без старого пароля: настройки открываются только
+        // на самой машине, удалённый зритель такого пути не имеет.
 
         _config.Name = name;
         _config.Server = server;
