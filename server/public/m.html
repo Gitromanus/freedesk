@@ -928,7 +928,25 @@ async function handleSignal(msg) {
 
     case 'ice':
       if (state.pc && payload && payload.candidate) {
-        try { await state.pc.addIceCandidate(payload); } catch (e) { /* поздние кандидаты */ }
+        // SIPSorcery присылает srflx с raddr 0.0.0.0 rport 0 — Chrome такой
+        // кандидат считает невалидным и молча выбрасывает. Убираем эти поля.
+        const fixed = String(payload.candidate)
+          .replace(/\s+raddr\s+0\.0\.0\.0\s+rport\s+0/gi, '')
+          .replace(/\s+raddr\s+0\.0\.0\.0\b/gi, '')
+          .trim();
+
+        note('ice← ' + fixed.split(' ').slice(4, 6).join(' '));
+
+        try {
+          await state.pc.addIceCandidate({
+            candidate: fixed,
+            sdpMid: payload.sdpMid,
+            sdpMLineIndex: payload.sdpMLineIndex,
+            usernameFragment: payload.usernameFragment,
+          });
+        } catch (e) {
+          note('ice✗ ' + e.message);
+        }
       }
       break;
   }

@@ -86,6 +86,9 @@ public sealed class WebRtcPeer : IPeerTransport
         {
             iceServers = new List<RTCIceServer>
             {
+                // Cloudflare STUN отвечает там, где Google STUN блокируется провайдером
+                // (без srflx-кандидата хост в мобильной сети недостижим).
+                new() { urls = "stun:stun.cloudflare.com:3478" },
                 new() { urls = "stun:stun.l.google.com:19302" },
                 new() { urls = "stun:stun1.l.google.com:19302" },
             },
