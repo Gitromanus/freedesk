@@ -112,7 +112,7 @@ try {
 
         case $method === 'GET' && $path === '/api/v1/session/incoming':
             $device = Auth::device();
-            Http::json(['ok' => true] + Sessions::incoming((int) $device['id']));
+            Http::json(['ok' => true] + Sessions::incoming((int) $device['id'], (int) ($_GET['wait'] ?? 0)));
 
         case $method === 'POST' && $path === '/api/v1/session/answer':
             $device = Auth::device();

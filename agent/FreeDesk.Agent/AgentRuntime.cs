@@ -74,7 +74,9 @@ public sealed class AgentRuntime
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(Math.Max(1, _config.PollSeconds)), ct);
+                // 2 секунды вместо 1: вместе с long-poll сессии это даёт ~30 запросов в минуту
+                // вместо 120, а заявка всё равно замечается за пару секунд.
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(2, _config.PollSeconds)), ct);
             }
             catch (OperationCanceledException)
             {
@@ -415,6 +417,9 @@ public sealed class AgentRuntime
             PeerName = item.From.Name,
             State = "active",
         };
+
+        var accepted = _sessions[item.SessionId];
+        _ = Task.Run(() => PollSessionLoopAsync(accepted, ct));
     }
 
     private void AttachTransport(ActiveSession session, bool offerer, VideoCodec codec)
@@ -516,31 +521,74 @@ public sealed class AgentRuntime
 
     private async Task PollSessionsAsync(CancellationToken ct)
     {
-        foreach (var session in _sessions.Values.ToList())
+        // Оставлено для совместимости: сейчас каждая сессия опрашивается своей задачей
+        // (PollSessionLoopAsync), чтобы long-poll одной не тормозил приём заявок.
+        await Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Свой цикл на сессию: long-poll 8 с — сигналы приходят сразу,
+    /// но сервер не долбится пустыми запросами.
+    /// </summary>
+    private async Task PollSessionLoopAsync(ActiveSession session, CancellationToken ct)
+    {
+        try
         {
-            var poll = await _client.PollAsync(session.Id, session.Cursor, ct);
-            session.Cursor = poll.Cursor;
-            session.State = poll.Session.State;
-
-            foreach (var message in poll.Messages)
+            while (!ct.IsCancellationRequested && _sessions.ContainsKey(session.Id))
             {
-                await HandleSignalAsync(session, message, ct);
-            }
+                PollResult poll;
 
-            if (session.State == "active" && session.Role == "host" && !session.OfferSent && session.Transport is not null)
-            {
-                var offer = await session.Transport.CreateOfferAsync(ct);
-                await _client.SignalAsync(session.Id, "offer", offer, ct);
-                session.OfferSent = true;
-                Log.Info($"offer отправлен: {session.PeerName}");
-            }
+                try
+                {
+                    poll = await _client.PollAsync(session.Id, session.Cursor, ct, waitSeconds: 8);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (ApiException ex) when (ex.Code is "forbidden" or "not_found" or "session_ended")
+                {
+                    Log.Info($"сессия закрыта сервером: {session.PeerName}");
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn($"poll {session.PeerName}: {ex.Message}");
+                    await Task.Delay(2000, ct).ContinueWith(_ => { });
+                    continue;
+                }
 
-            if (session.State == "ended")
-            {
-                Log.Info($"сессия завершена: {session.PeerName}");
-                await CloseSessionAsync(session);
-                _sessions.TryRemove(session.Id, out _);
+                session.Cursor = poll.Cursor;
+                session.State = poll.Session.State;
+
+                foreach (var message in poll.Messages)
+                {
+                    await HandleSignalAsync(session, message, ct);
+                }
+
+                if (session.State == "active" && session.Role == "host" && !session.OfferSent && session.Transport is not null)
+                {
+                    var offer = await session.Transport.CreateOfferAsync(ct);
+                    await _client.SignalAsync(session.Id, "offer", offer, ct);
+                    session.OfferSent = true;
+                    Log.Info($"offer отправлен: {session.PeerName}");
+                }
+
+                if (session.State == "ended")
+                {
+                    Log.Info($"сессия завершена: {session.PeerName}");
+                    await CloseSessionAsync(session);
+                    _sessions.TryRemove(session.Id, out _);
+                    break;
+                }
             }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Error($"цикл сессии прерван: {ex.Message}");
         }
     }
 

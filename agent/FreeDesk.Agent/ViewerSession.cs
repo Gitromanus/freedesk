@@ -101,7 +101,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
             while (!ct.IsCancellationRequested)
             {
-                var poll = await _client.PollAsync(_sessionId, _cursor, ct);
+                var poll = await _client.PollAsync(_sessionId, _cursor, ct, waitSeconds: 8);
                 _cursor = poll.Cursor;
 
                 foreach (var message in poll.Messages)

@@ -40,9 +40,11 @@ public sealed class SignalingClient : IDisposable
             HttpMethod.Post, "api/v1/presence", new { name = _config.Name }, ct);
     }
 
-    public async Task<IncomingResult> IncomingAsync(CancellationToken ct)
+    public async Task<IncomingResult> IncomingAsync(CancellationToken ct, int waitSeconds = 0)
     {
-        return await SendAsync<IncomingResult>(HttpMethod.Get, "api/v1/session/incoming", null, ct);
+        var wait = Math.Clamp(waitSeconds, 0, 15);
+        return await SendAsync<IncomingResult>(
+            HttpMethod.Get, $"api/v1/session/incoming?wait={wait}", null, ct);
     }
 
     public async Task<RequestResult> RequestAsync(string targetId, CancellationToken ct)
@@ -70,10 +72,15 @@ public sealed class SignalingClient : IDisposable
         return await SendAsync<ResolveResult>(HttpMethod.Get, $"api/v1/resolve/{publicId}", null, ct);
     }
 
-    public async Task<PollResult> PollAsync(string sessionId, long since, CancellationToken ct)
+    /// <summary>
+    /// Опрос сигналов сессии. waitSeconds включает long-poll на сервере:
+    /// без него клиент долбит сервер 2 раза в секунду и жжёт CPU хостинга.
+    /// </summary>
+    public async Task<PollResult> PollAsync(string sessionId, long since, CancellationToken ct, int waitSeconds = 0)
     {
+        var wait = Math.Clamp(waitSeconds, 0, 20);
         return await SendAsync<PollResult>(
-            HttpMethod.Get, $"api/v1/session/poll?session_id={sessionId}&since={since}", null, ct);
+            HttpMethod.Get, $"api/v1/session/poll?session_id={sessionId}&since={since}&wait={wait}", null, ct);
     }
 
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object? body, CancellationToken ct)

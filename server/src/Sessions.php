@@ -55,17 +55,32 @@ final class Sessions
     }
 
     /** Входящие заявки на подключение — их опрашивает принимающая сторона. */
-    public static function incoming(int $deviceId): array
+    public static function incoming(int $deviceId, int $wait = 0): array
     {
-        $rows = Db::all(
-            "SELECT s.id, s.created_at, d.public_id, d.name, d.os
-             FROM sessions s
-             JOIN devices d ON d.id = s.from_device
-             WHERE s.to_device = ? AND s.state = 'pending'
-             ORDER BY s.created_at ASC
-             LIMIT 20",
-            [$deviceId]
-        );
+        $wait = min(15, max(0, $wait));
+        $deadline = microtime(true) + $wait;
+
+        $rows = [];
+
+        // long-poll: хост держит запрос и получает заявку сразу, как она появилась,
+        // вместо опроса раз в секунду.
+        while (true) {
+            $rows = Db::all(
+                "SELECT s.id, s.created_at, d.public_id, d.name, d.os
+                 FROM sessions s
+                 JOIN devices d ON d.id = s.from_device
+                 WHERE s.to_device = ? AND s.state = 'pending'
+                 ORDER BY s.created_at ASC
+                 LIMIT 20",
+                [$deviceId]
+            );
+
+            if ($rows !== [] || microtime(true) >= $deadline) {
+                break;
+            }
+
+            usleep(600_000);
+        }
 
         $items = [];
 
@@ -182,7 +197,12 @@ final class Sessions
 
         $deadline = microtime(true) + $wait;
         $rows = [];
+        $round = 0;
+        $prevState = (string) $session['state'];
 
+        // В режиме ожидания не дёргаем MySQL каждые 400 мс: сигналы — всегда,
+        // состояние сессии — раз в два круга. Смена состояния (pending → active)
+        // должна разбудить запрос сразу, иначе оффер уходит с задержкой в wait секунд.
         while (true) {
             $rows = Db::all(
                 'SELECT id, type, payload FROM signals
@@ -191,13 +211,23 @@ final class Sessions
                 [$sid, $since, $deviceId]
             );
 
-            $state = self::load($sid)['state'];
-
-            if ($rows !== [] || $state === 'ended' || microtime(true) >= $deadline) {
+            if ($rows !== []) {
                 break;
             }
 
-            usleep(400_000);
+            if (++$round % 2 === 0) {
+                $state = self::load($sid)['state'];
+
+                if ($state !== $prevState) {
+                    break;
+                }
+            }
+
+            if (microtime(true) >= $deadline) {
+                break;
+            }
+
+            usleep(600_000);
         }
 
         $cursor = $since;

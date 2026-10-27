@@ -9,22 +9,39 @@ final class Cleanup
     public static function maybeRun(int $intervalSeconds = 60): void
     {
         try {
-            $last = (int) (Db::one('SELECT v FROM state WHERE k = ?', ['last_cleanup'])['v'] ?? 0);
+            // Отметка времени — в файле, а не в таблице state: этот код вызывается
+            // на каждом запросе, и лишний SELECT в горячем пути ни к чему.
+            $stamp = self::stampFile();
+            $last = 0;
+
+            if ($stamp !== null && is_file($stamp)) {
+                $last = (int) @file_get_contents($stamp);
+            }
 
             if (time() - $last < $intervalSeconds) {
                 return;
             }
 
-            Db::exec(
-                'INSERT INTO state (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)',
-                ['last_cleanup', (string) time()]
-            );
+            if ($stamp !== null) {
+                @file_put_contents($stamp, (string) time(), LOCK_EX);
+            }
 
             self::run();
         } catch (\Throwable $e) {
             // Уборка не должна ломать API.
             error_log('[freedesk] cleanup failed: ' . $e->getMessage());
         }
+    }
+
+    private static function stampFile(): ?string
+    {
+        $dir = sys_get_temp_dir();
+
+        if ($dir === '' || !is_dir($dir) || !is_writable($dir)) {
+            return null;
+        }
+
+        return $dir . '/fd-cleanup.stamp';
     }
 
     public static function run(): array
