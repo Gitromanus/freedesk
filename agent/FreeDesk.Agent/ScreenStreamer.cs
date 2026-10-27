@@ -46,9 +46,13 @@ public sealed class ScreenStreamer : IAsyncDisposable
     private int _displayIndex;
     private int _requestedDisplay = -1;
 
+    /// <summary>Браузерный режим: кадры JPEG уходят бинарём по data channel вместо RTP.</summary>
+    private readonly bool _jpegOverDataChannel;
+    private int _frameSeq;
+
     public ScreenStreamer(
         IPeerTransport transport, int fps, long quality, int maxWidth, string captureMode = "auto",
-        int bitrateKbps = 3000, int displayIndex = 0)
+        int bitrateKbps = 3000, int displayIndex = 0, bool jpegOverDataChannel = false)
     {
         _transport = transport;
         _fps = Math.Clamp(fps, 1, 60);
@@ -58,6 +62,16 @@ public sealed class ScreenStreamer : IAsyncDisposable
         _bitrateKbps = Math.Clamp(bitrateKbps, 200, 50_000);
         _targetKbps = _bitrateKbps;
         _displayIndex = Math.Max(0, displayIndex);
+        _jpegOverDataChannel = jpegOverDataChannel;
+
+        // Браузерный режим: JPEG идёт по SCTP, где реально ~1 МБ/с.
+        // Без ограничений кадр 1920×1080 даёт 15 Мбит/с — телефон такое не переварит.
+        if (_jpegOverDataChannel)
+        {
+            _fps = Math.Min(_fps, 10);
+            _quality = Math.Min(_quality, 60);
+            _maxWidth = _maxWidth <= 0 ? 1280 : Math.Min(_maxWidth, 1280);
+        }
     }
 
     public void Start()
@@ -153,7 +167,7 @@ public sealed class ScreenStreamer : IAsyncDisposable
             Log.Info($"захват: {_capture.GetType().Name} {_capture.Width}x{_capture.Height} " +
                      $"(монитор #{_displayIndex}), кодек {_transport.Codec.ToWire()}");
 
-            if (_transport.Codec == VideoCodec.H264)
+            if (_transport.Codec == VideoCodec.H264 && !_jpegOverDataChannel)
             {
                 // создаём сразу: если openh264.dll нет, узнаем об этом в логе, а не в тишине
                 EnsureEncoder(_capture.Width, _capture.Height);
@@ -175,7 +189,7 @@ public sealed class ScreenStreamer : IAsyncDisposable
 
                     var frame = _capture!.CaptureFrame(out var stride);
 
-                    if (_encoder is null)
+                    if (_encoder is null || _jpegOverDataChannel)
                     {
                         SendMjpeg(frame, stride, ref frames, ref bytes, ref skipped);
                     }
@@ -195,7 +209,7 @@ public sealed class ScreenStreamer : IAsyncDisposable
                     var perFrame = frames > 0 ? bytes / frames / 1024 : 0;
 
                     Log.Info(
-                        $"поток ({_transport.Codec.ToWire()}): {frames / seconds:F1} fps, " +
+                        $"поток ({(_jpegOverDataChannel ? "jpgdata" : _transport.Codec.ToWire())}): {frames / seconds:F1} fps, " +
                         $"{perFrame} КБ/кадр, {bytes * 8 / seconds / 1_000_000:F1} Мбит/с" +
                         (skipped > 0 ? $", пропущено статичных: {skipped}" : ""));
 
@@ -223,6 +237,29 @@ public sealed class ScreenStreamer : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Браузерный режим: пакет [0xF1][резерв][seq:2 LE][длина:4 LE][JPEG].
+    /// Формат читает m.html; порядок байт — little-endian, как в DataView.
+    /// </summary>
+    private void SendJpegOverChannel(byte[] jpeg)
+    {
+        var packet = new byte[8 + jpeg.Length];
+        packet[0] = 0xF1;
+
+        var seq = (ushort)(_frameSeq++ & 0xFFFF);
+        packet[2] = (byte)(seq & 0xFF);
+        packet[3] = (byte)(seq >> 8);
+
+        var length = jpeg.Length;
+        packet[4] = (byte)(length & 0xFF);
+        packet[5] = (byte)((length >> 8) & 0xFF);
+        packet[6] = (byte)((length >> 16) & 0xFF);
+        packet[7] = (byte)((length >> 24) & 0xFF);
+
+        Buffer.BlockCopy(jpeg, 0, packet, 8, jpeg.Length);
+        _transport.SendBinary(packet);
+    }
+
     private void SendMjpeg(ReadOnlySpan<byte> frame, int stride, ref int frames, ref long bytes, ref int skipped)
     {
         // Кадр не изменился и последний отправляли недавно — пропускаем
@@ -237,7 +274,14 @@ public sealed class ScreenStreamer : IAsyncDisposable
 
         var jpeg = JpegEncoder.Encode(frame, _capture!.Width, _capture.Height, stride, _quality, _maxWidth);
 
-        _transport.SendFrame(jpeg, Duration);
+        if (_jpegOverDataChannel)
+        {
+            SendJpegOverChannel(jpeg);
+        }
+        else
+        {
+            _transport.SendFrame(jpeg, Duration);
+        }
         Remember(frame);
         _lastSentAt = DateTime.UtcNow;
         _consecutiveErrors = 0;

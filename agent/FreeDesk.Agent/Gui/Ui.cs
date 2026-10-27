@@ -603,6 +603,8 @@ public sealed class CaptionButton : Control
         Cursor = Cursors.Hand;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        // каждый клик в шеврон/крестик должен отрабатывать, включая второй быстрый
+        SetStyle(ControlStyles.StandardDoubleClick, false);
     }
 
     public CaptionGlyph Glyph

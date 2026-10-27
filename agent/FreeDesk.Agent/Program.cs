@@ -53,6 +53,7 @@ string? viewTarget = null;
 string? inputTestTarget = null;
 string? viewPassword = null;
 string? newPassword = null;
+string? oldPassword = null;
 bool clearPassword = false;
 bool guiMode = guiRequested;
 var openSettings = false;
@@ -122,6 +123,9 @@ for (var i = 0; i < args.Length; i++)
         case "--set-password" when i + 1 < args.Length:
             newPassword = args[++i];
             break;
+        case "--old-password" when i + 1 < args.Length:
+            oldPassword = args[++i];
+            break;
         case "--clear-password":
             clearPassword = true;
             break;
@@ -180,7 +184,9 @@ for (var i = 0; i < args.Length; i++)
                   --password <пароль>  пароль устройства для подключения без подтверждения
                   --send-file <путь>   после подключения отправить файл на удалённую машину
                   --download <путь>    после подключения скачать файл по пути на удалённой машине
-                  --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти
+                  --set-password <п..> сохранить пароль unattended-доступа в профиль и выйти;
+                                       смена/удаление требуют текущий пароль (--old-password)
+                  --old-password <п..> текущий пароль профиля (для смены/удаления)
                   --clear-password     удалить сохранённый пароль профиля и выйти
                   --profile <имя>      отдельный профиль (несколько агентов на машине)
                   --auto-accept        (убран) раньше принимал входящие без подтверждения
@@ -205,6 +211,19 @@ for (var i = 0; i < args.Length; i++)
 
 if (newPassword is not null || clearPassword)
 {
+    // Смена и снятие — только со знанием текущего пароля: зритель, оставшийся
+    // за компьютером в отсутствие владельца, не сможет скрыто переписать доступ.
+    if (config.HasUnattendedPassword)
+    {
+        var current = config.GetUnattendedSecret();
+        if (current is null || !UnattendedAuth.MatchesStored(oldPassword ?? "", current))
+        {
+            Console.Error.WriteLine(
+                "в профиле уже есть пароль устройства: смена/удаление требуют текущего пароля (--old-password <пароль>)");
+            return 2;
+        }
+    }
+
     if (clearPassword)
     {
         config.ClearUnattendedPassword();

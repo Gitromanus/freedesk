@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#070912">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>FreeDesk — подключение с телефона</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%237c6cff'/%3E%3Cpath d='M36 12 20 36h10l-2 16 16-24H34z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="manifest" href="m.webmanifest">
+<style>
+  :root{
+    --accent:#7c6cff; --accent-2:#22d3ee; --accent-3:#ff6ad5;
+    --ok:#34d399; --warn:#fbbf24; --bad:#fb7185;
+    --ff: ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+    --bg:#070912; --surface: rgba(255,255,255,.055); --surface-2: rgba(255,255,255,.09);
+    --border: rgba(255,255,255,.10); --border-strong: rgba(255,255,255,.2);
+    --text:#e9edfb; --muted:#98a2c0; --faint:#6a7495;
+    --r:14px; --r-lg:20px;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--ff);
+    font-size:15px; line-height:1.5; overscroll-behavior:none;
+    -webkit-font-smoothing:antialiased;
+  }
+  body::before{
+    content:""; position:fixed; inset:0; z-index:0; pointer-events:none;
+    background:
+      radial-gradient(700px 460px at 12% -10%, rgba(124,108,255,.22), transparent 62%),
+      radial-gradient(620px 420px at 96% 4%, rgba(34,211,238,.16), transparent 62%),
+      radial-gradient(560px 420px at 50% 116%, rgba(255,106,213,.12), transparent 62%);
+  }
+  .gate{
+    position:relative; z-index:1; min-height:100%; display:flex; align-items:center; justify-content:center;
+    padding:24px 18px calc(24px + env(safe-area-inset-bottom));
+  }
+  .card{
+    width:100%; max-width:420px; background:var(--surface); border:1px solid var(--border);
+    border-radius:var(--r-lg); padding:22px; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+    box-shadow:0 24px 60px rgba(0,0,0,.5);
+  }
+  .brand{display:flex; align-items:center; gap:11px; margin-bottom:18px}
+  .mark{
+    width:40px; height:40px; border-radius:13px; display:grid; place-items:center; flex:none; color:#fff;
+    background:linear-gradient(135deg, var(--accent), var(--accent-2)); box-shadow:0 8px 28px rgba(124,108,255,.35);
+  }
+  .mark svg{width:21px; height:21px}
+  .brand__name{font-weight:700; letter-spacing:.14em; font-size:15px}
+  .brand__sub{font-size:12px; color:var(--faint); margin-top:-2px}
+  h1{font-size:22px; margin:0 0 6px; letter-spacing:-.02em}
+  .hint{color:var(--muted); font-size:13px; margin:0 0 16px}
+  .field{margin-bottom:12px}
+  .field label{display:block; font-size:12px; color:var(--faint); margin-bottom:6px}
+  input[type=tel],input[type=password],input[type=text]{
+    width:100%; padding:14px 14px; font-size:17px; color:var(--text);
+    background:rgba(0,0,0,.35); border:1px solid var(--border); border-radius:var(--r);
+    outline:none; font-family:var(--mono); letter-spacing:.06em;
+  }
+  input::placeholder{color:var(--faint); letter-spacing:0}
+  input:focus{border-color:var(--accent); box-shadow:0 0 0 4px rgba(124,108,255,.22)}
+  .btn{
+    display:flex; align-items:center; justify-content:center; gap:8px; width:100%;
+    min-height:50px; padding:13px 18px; border:0; border-radius:var(--r);
+    font:600 15.5px/1 var(--ff); color:#fff; cursor:pointer;
+    background:linear-gradient(120deg, var(--accent), #5f7cff 55%, var(--accent-2));
+    box-shadow:0 8px 28px rgba(124,108,255,.35);
+  }
+  .btn:active{transform:scale(.985)}
+  .btn[disabled]{opacity:.5; pointer-events:none}
+  .btn--ghost{
+    background:transparent; border:1px solid var(--border-strong); color:var(--text); box-shadow:none;
+  }
+  .meta{display:flex; justify-content:space-between; gap:10px; margin-top:14px; font-size:12px; color:var(--faint)}
+  .meta b{color:var(--muted); font-family:var(--mono); font-weight:500}
+
+  /* сцена просмотра */
+  .stage{position:fixed; inset:0; z-index:10; background:#000; display:none; touch-action:none}
+  .stage.on{display:block}
+  .stage canvas{position:absolute; inset:0; width:100%; height:100%; background:#000}
+  .stage video{position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000}
+  .topbar{
+    position:absolute; top:0; left:0; right:0; z-index:3; display:flex; align-items:center; gap:10px;
+    padding:calc(8px + env(safe-area-inset-top)) 12px 8px;
+    background:linear-gradient(180deg, rgba(7,9,18,.85), rgba(7,9,18,0));
+    font-size:13px;
+  }
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 10px var(--ok); flex:none}
+  .topbar__name{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .topbar__sp{flex:1}
+  .icon{
+    width:42px; height:42px; border-radius:50%; display:grid; place-items:center;
+    background:rgba(255,255,255,.08); border:1px solid var(--border); color:var(--text);
+    font-size:18px; cursor:pointer; backdrop-filter:blur(8px);
+  }
+  .icon:active{transform:scale(.94)}
+  .sheet{
+    position:absolute; left:10px; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); z-index:4;
+    background:rgba(15,20,34,.94); border:1px solid var(--border); border-radius:var(--r-lg);
+    padding:12px; display:none; gap:10px; grid-template-columns:1fr 1fr;
+    backdrop-filter:blur(16px); -webkit-backdrop-filter:blur(16px);
+    box-shadow:0 24px 60px rgba(0,0,0,.55);
+  }
+  .sheet.on{display:grid}
+  .sheet .btn{min-height:46px; font-size:14px}
+  .sheet .btn--wide{grid-column:span 2}
+  .toast{
+    position:fixed; left:50%; transform:translateX(-50%); bottom:calc(24px + env(safe-area-inset-bottom));
+    z-index:20; max-width:90vw; padding:10px 16px; border-radius:999px; font-size:13px;
+    background:rgba(15,20,34,.95); border:1px solid var(--border-strong); color:var(--text);
+    opacity:0; pointer-events:none; transition:opacity .25s;
+  }
+  .toast.on{opacity:1}
+  .kbd{position:fixed; left:-9999px; top:0; width:1px; height:1px; opacity:0}
+  @media (min-width:760px){
+    .stage video{object-fit:contain}
+  }
+</style>
+</head>
+<body>
+
+<!-- ─────────── вход ─────────── -->
+<div class="gate" id="gate">
+  <div class="card">
+    <div class="brand">
+      <span class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M13.4 2 5 14h5.2L9 22l8.6-12h-5.4L13.4 2z" fill="currentColor"/></svg></span>
+      <span>
+        <div class="brand__name">FREEDESK</div>
+        <div class="brand__sub" id="myline">регистрация…</div>
+      </span>
+    </div>
+
+    <h1>Подключиться к компьютеру</h1>
+    <p class="hint">Введите 9-значный ID с экрана программы на компьютере. Пароль нужен, если на нём включён доступ без подтверждения.</p>
+
+    <div class="field">
+      <label for="target">ID устройства</label>
+      <input id="target" type="tel" inputmode="numeric" autocomplete="off" placeholder="495 836 047" maxlength="11">
+    </div>
+    <div class="field">
+      <label for="password">Пароль устройства (если задан)</label>
+      <input id="password" type="password" autocomplete="off" placeholder="необязательно">
+    </div>
+
+    <button class="btn" id="go">Подключиться</button>
+    <div class="meta">
+      <span>ваш ID: <b id="myid">—</b></span>
+      <a href="/" style="color:var(--faint)">о программе</a>
+    </div>
+  </div>
+</div>
+
+<!-- ─────────── просмотр ─────────── -->
+<div class="stage" id="stage">
+  <canvas id="screen"></canvas>
+
+  <div class="topbar">
+    <span class="dot" id="dot"></span>
+    <span class="topbar__name" id="peer">подключение…</span>
+    <span class="topbar__sp"></span>
+    <button class="icon" id="menuBtn" aria-label="Меню">⋯</button>
+  </div>
+
+  <div class="sheet" id="sheet">
+    <button class="btn btn--ghost" id="kbBtn">Клавиатура</button>
+    <button class="btn btn--ghost" id="textBtn">Вставить текст</button>
+    <button class="btn btn--ghost" id="rightBtn">Правый клик</button>
+    <button class="btn btn--ghost" id="kfBtn">Обновить кадр</button>
+    <button class="btn btn--ghost btn--wide" id="closeBtn" style="border-color:rgba(251,113,133,.45); color:#fb7185">Отключиться</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<input class="kbd" id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+
+<script>
+'use strict';
+
+// ─────────── состояние ───────────
+const API = '';                       // тот же origin, что и страница
+const LS = { token: 'fd.token', id: 'fd.id', name: 'fd.name' };
+
+const state = {
+  token: localStorage.getItem(LS.token) || '',
+  id: localStorage.getItem(LS.id) || '',
+  sid: null,
+  since: 0,
+  pc: null,
+  dc: null,
+  offerSent: false,
+  offering: false,
+  ticking: false,
+  pendingAnswer: null,
+  log: [],
+  lastError: null,
+  answerSdp: null,
+  password: '',
+  lastPresence: 0,
+  frames: 0,
+  lastFrames: 0,
+  lastFrameAt: 0,
+  loop: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const canvas = $('screen');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+let frameW = 0, frameH = 0, frameCount = 0;
+
+function note(text) {
+  state.log.push(new Date().toISOString().slice(11, 19) + ' ' + text);
+  if (state.log.length > 60) state.log.shift();
+}
+function toast(text, ms = 2200) {
+  const el = $('toast');
+  el.textContent = text;
+  el.classList.add('on');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('on'), ms);
+}
+
+function fmtId(id) {
+  return (id || '').replace(/(\d{3})(\d{3})(\d{3})/, '$1 $2 $3');
+}
+
+// ─────────── API ───────────
+async function api(method, path, body) {
+  const headers = {};
+  if (body) headers['Content-Type'] = 'application/json';
+  if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+
+  const res = await fetch(API + path, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    cache: 'no-store',
+  });
+
+  const data = await res.json().catch(() => ({ ok: false, error: 'bad_response' }));
+
+  if (!res.ok || data.ok === false) {
+    const err = new Error(data.error || ('http_' + res.status));
+    err.code = data.error;
+    err.message2 = data.message || '';
+    throw err;
+  }
+
+  return data;
+}
+
+async function ensureRegistered() {
+  if (state.token && state.id) {
+    $('myid').textContent = fmtId(state.id);
+    $('myline').textContent = 'устройство зарегистрировано';
+    return;
+  }
+
+  const name = /Android/i.test(navigator.userAgent) ? 'android-web' : 'web';
+  const d = await api('POST', '/api/v1/device/register', {
+    name,
+    os: navigator.userAgent.slice(0, 120),
+  });
+
+  state.token = d.device_token;
+  state.id = d.public_id;
+  localStorage.setItem(LS.token, state.token);
+  localStorage.setItem(LS.id, state.id);
+  localStorage.setItem(LS.name, name);
+
+  $('myid').textContent = fmtId(state.id);
+  $('myline').textContent = 'устройство зарегистрировано';
+}
+
+// ─────────── PBKDF2 (challenge-response) ───────────
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64(bytes) {
+  let bin = '';
+  const view = new Uint8Array(bytes);
+  for (let i = 0; i < view.length; i++) bin += String.fromCharCode(view[i]);
+  return btoa(bin);
+}
+
+/** proof = PBKDF2( PBKDF2(пароль, salt), nonce ) — как в Windows-клиенте. */
+async function makeProof(password, saltB64, iterations, nonceB64) {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const hash = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: b64ToBytes(saltB64), iterations, hash: 'SHA-256' }, base, 256);
+  const key = await crypto.subtle.importKey('raw', hash, 'PBKDF2', false, ['deriveBits']);
+  const proof = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', salt: b64ToBytes(nonceB64), iterations, hash: 'SHA-256' }, key, 256);
+  return bytesToB64(proof);
+}
+
+// ─────────── WebRTC ───────────
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+  ],
+};
+
+async function startOffer(target) {
+  state.offering = true;
+
+  try {
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    state.pc = pc;
+
+  // видео: sendrecv — иначе ответ хоста может прийти с несовместимым направлением
+  // (Chrome строг к a=recvonly в ответе на recvonly-оффер)
+  const transceiver = pc.addTransceiver('video', { direction: 'sendrecv' });
+
+  if (transceiver.setCodecPreferences && window.RTCRtpReceiver) {
+    const caps = RTCRtpReceiver.getCapabilities('video');
+    const h264 = (caps && caps.codecs ? caps.codecs : []).filter(c => /H264/i.test(c.mimeType));
+    if (h264.length) {
+      try { transceiver.setCodecPreferences(h264); } catch (e) { /* старые браузеры */ }
+    }
+  }
+
+  pc.ontrack = (ev) => {
+    // запасной путь: если хост когда-то отдаст видео по RTP, покажем в теге video
+    const fallback = document.getElementById('rtcvideo');
+    if (!fallback) return;
+    fallback.srcObject = ev.streams && ev.streams[0] ? ev.streams[0] : new MediaStream([ev.track]);
+    fallback.play().catch(() => {});
+  };
+
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+    if (st === 'connected') setDot('ok');
+    if (st === 'failed' || st === 'disconnected') setDot('warn');
+  };
+
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed') toast('сеть: не удалось установить прямой канал');
+  };
+
+  // канал управления создаёт зритель — хост слушает имя «freedesk»
+  const dc = pc.createDataChannel('freedesk', { ordered: true });
+  state.dc = dc;
+  dc.binaryType = 'arraybuffer';
+  dc.onopen = () => { setDot('ok'); requestKeyframe(); };
+  dc.onclose = () => setDot('warn');
+  dc.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) onFramePacket(ev.data); };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  // ждём сбора ICE: без trickle проще и надёжнее на мобильной сети
+  await new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const timer = setTimeout(resolve, 2500);
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
+    };
+  });
+
+  await api('POST', '/api/v1/session/signal', {
+    session_id: state.sid,
+    type: 'offer',
+    payload: { type: 'offer', sdp: pc.localDescription.sdp, codec: 'jpgdata' },
+  });
+
+    state.offerSent = true;
+
+    if (state.pendingAnswer) {
+      const sdp = state.pendingAnswer;
+      state.pendingAnswer = null;
+      try { await pc.setRemoteDescription({ type: 'answer', sdp }); } catch (e) { }
+    }
+  } finally {
+    state.offering = false;
+  }
+}
+
+function setDot(kind) {
+  const el = $('dot');
+  el.style.background = kind === 'ok' ? 'var(--ok)' : kind === 'warn' ? 'var(--warn)' : 'var(--muted)';
+  el.style.boxShadow = kind === 'ok' ? '0 0 10px var(--ok)' : 'none';
+}
+
+// ─────────── управление (data channel) ───────────
+function send(obj) {
+  if (state.dc && state.dc.readyState === 'open') {
+    state.dc.send(JSON.stringify(obj));
+  }
+}
+
+function requestKeyframe() { send({ t: 'kf' }); }
+
+// ─────────── кадры по data channel ───────────
+let decodeBusy = false;
+let pendingFrame = null;
+
+function onFramePacket(buffer) {
+  const view = new DataView(buffer);
+
+  if (buffer.byteLength < 8 || view.getUint8(0) !== 0xF1) return;   // не наш пакет
+
+  const length = view.getUint32(4, true);
+  if (length <= 0 || 8 + length > buffer.byteLength) return;
+
+  pendingFrame = new Uint8Array(buffer, 8, length);
+
+  if (!decodeBusy) pumpFrames();
+}
+
+async function pumpFrames() {
+  decodeBusy = true;
+
+  try {
+    while (pendingFrame) {
+      const bytes = pendingFrame;
+      pendingFrame = null;
+
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }));
+      drawFrame(bitmap);
+      if (bitmap.close) bitmap.close();
+
+      frameCount++;
+      setDot('ok');
+    }
+  } catch (e) {
+    state.lastError = 'frame: ' + e.message;
+  } finally {
+    decodeBusy = false;
+  }
+}
+
+function resizeCanvas() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+}
+
+function drawFrame(bitmap) {
+  frameW = bitmap.width;
+  frameH = bitmap.height;
+
+  resizeCanvas();
+
+  const r = containerRect();
+  const dpr = canvas.width / Math.max(1, canvas.clientWidth);
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(bitmap, r.left * dpr, r.top * dpr, r.width * dpr, r.height * dpr);
+}
+
+window.addEventListener('resize', () => {
+  if (frameW) resizeCanvas();
+});
+
+// ─────────── экран и координаты ───────────
+function shownRect() {
+  return containerRect();
+}
+
+/** Прямоугольник кадра внутри канваса (object-fit: contain). */
+function containerRect() {
+  const box = { w: canvas.clientWidth, h: canvas.clientHeight };
+  const vw = frameW || 16, vh = frameH || 9;
+  const scale = Math.min(box.w / vw, box.h / vh);
+  const w = vw * scale, h = vh * scale;
+
+  return { left: (box.w - w) / 2, top: (box.h - h) / 2, width: w, height: h };
+}
+
+function normalize(clientX, clientY) {
+  const r = shownRect();
+  const x = (clientX - r.left) / r.width;
+  const y = (clientY - r.top) / r.height;
+  return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
+}
+
+function moveTo(clientX, clientY) {
+  const p = normalize(clientX, clientY);
+  send({ t: 'm', x: p.x, y: p.y });
+}
+
+// ─────────── жесты ───────────
+let gesture = null;
+
+$('stage').addEventListener('pointerdown', (e) => {
+  if (e.target.closest('.topbar') || e.target.closest('.sheet')) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+
+  gesture = {
+    id: e.pointerId,
+    startX: e.clientX,
+    startY: e.clientY,
+    lastX: e.clientX,
+    lastY: e.clientY,
+    moved: false,
+    long: false,
+    timer: setTimeout(() => {
+      if (!gesture || gesture.moved) return;
+      gesture.long = true;
+      moveTo(gesture.lastX, gesture.lastY);
+      send({ t: 'mb', b: 'right', d: true });
+      send({ t: 'mb', b: 'right', d: false });
+      if (navigator.vibrate) navigator.vibrate(15);
+      toast('правый клик');
+    }, 480),
+  };
+
+  moveTo(e.clientX, e.clientY);
+  $('stage').setPointerCapture(e.pointerId);
+}, { passive: true });
+
+$('stage').addEventListener('pointermove', (e) => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+
+  const dx = e.clientX - gesture.lastX;
+  const dy = e.clientY - gesture.lastY;
+
+  if (Math.abs(e.clientX - gesture.startX) > 8 || Math.abs(e.clientY - gesture.startY) > 8) {
+    gesture.moved = true;
+    clearTimeout(gesture.timer);
+  }
+
+  gesture.lastX = e.clientX;
+  gesture.lastY = e.clientY;
+
+  if (gesture.moved) moveTo(e.clientX, e.clientY);
+  else if (Math.abs(dx) + Math.abs(dy) > 2) moveTo(e.clientX, e.clientY);
+}, { passive: true });
+
+$('stage').addEventListener('pointerup', (e) => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+
+  clearTimeout(gesture.timer);
+  const wasLong = gesture.long;
+  const wasMoved = gesture.moved;
+
+  if (!wasLong) {
+    moveTo(e.clientX, e.clientY);
+    if (!wasMoved) {
+      send({ t: 'mb', b: 'left', d: true });
+      send({ t: 'mb', b: 'left', d: false });
+    } else {
+      send({ t: 'mb', b: 'left', d: true });
+      send({ t: 'mb', b: 'left', d: false });
+    }
+  }
+
+  gesture = null;
+}, { passive: true });
+
+$('stage').addEventListener('pointercancel', () => { gesture = null; });
+
+// прокрутка двумя пальцами (и колесом на десктопе)
+let wheel = { y: 0, active: false };
+
+$('stage').addEventListener('touchstart', (e) => {
+  if (e.touches.length === 2) { wheel.active = true; wheel.y = (e.touches[0].clientY + e.touches[1].clientY) / 2; }
+}, { passive: true });
+
+$('stage').addEventListener('touchmove', (e) => {
+  if (!wheel.active || e.touches.length !== 2) return;
+  const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+  const delta = wheel.y - y;
+  if (Math.abs(delta) > 8) {
+    send({ t: 'w', d: Math.round(delta * 6) });
+    wheel.y = y;
+  }
+}, { passive: true });
+
+$('stage').addEventListener('touchend', (e) => {
+  if (e.touches.length < 2) wheel.active = false;
+}, { passive: true });
+
+$('stage').addEventListener('wheel', (e) => {
+  e.preventDefault();
+  send({ t: 'w', d: Math.round(-e.deltaY) });
+}, { passive: false });
+
+// ─────────── клавиатура ───────────
+const VK = {
+  Enter: 13, Backspace: 8, Tab: 9, Escape: 27, Space: 32,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+  Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34,
+  Control: 17, Shift: 16, Alt: 18, Meta: 91,
+};
+
+function vkFor(e) {
+  if (VK[e.key]) return VK[e.key];
+  if (e.key && e.key.length === 1) {
+    const code = e.key.toUpperCase().charCodeAt(0);
+    if (code >= 65 && code <= 90) return code;        // A..Z
+    if (code >= 48 && code <= 57) return code;        // 0..9
+    const punct = { '.': 190, ',': 188, ';': 186, ':': 186, '/': 191, '\\': 220, '-': 189, '=': 187,
+                    '[': 219, ']': 221, "'": 222, '`': 192, '!': 49, '@': 50, '#': 51, '$': 52, '%': 53,
+                    '^': 54, '&': 55, '*': 56, '(': 57, ')': 48, '_': 189, '+': 187 };
+    if (punct[e.key]) return punct[e.key];
+  }
+  return 0;
+}
+
+function typeKey(code, down) {
+  if (!code) return;
+  send({ t: 'k', vk: code, d: down });
+}
+
+$('kbd').addEventListener('keydown', (e) => {
+  const code = vkFor(e);
+  if (!code) return;
+  e.preventDefault();
+  typeKey(code, true);
+});
+
+$('kbd').addEventListener('keyup', (e) => {
+  const code = vkFor(e);
+  if (!code) return;
+  e.preventDefault();
+  typeKey(code, false);
+});
+
+/** Текст: кладём в буфер обмена хоста и жмём Ctrl+V (для кириллицы и эмодзи). */
+function pasteText(text) {
+  if (!text) return;
+  send({ t: 'cb', v: text });
+  setTimeout(() => {
+    send({ t: 'k', vk: 17, d: true });
+    send({ t: 'k', vk: 86, d: true });
+    send({ t: 'k', vk: 86, d: false });
+    send({ t: 'k', vk: 17, d: false });
+  }, 120);
+}
+
+// ─────────── меню ───────────
+$('menuBtn').onclick = () => $('sheet').classList.toggle('on');
+
+$('kbBtn').onclick = () => {
+  $('sheet').classList.remove('on');
+  const kbd = $('kbd');
+  kbd.value = '';
+  kbd.focus();
+  toast('клавиатура активна — печатайте');
+};
+
+$('textBtn').onclick = () => {
+  $('sheet').classList.remove('on');
+  const text = window.prompt('Текст для вставки на компьютере');
+  if (text) pasteText(text);
+};
+
+$('rightBtn').onclick = () => {
+  $('sheet').classList.remove('on');
+  send({ t: 'mb', b: 'right', d: true });
+  send({ t: 'mb', b: 'right', d: false });
+  toast('правый клик');
+};
+
+$('kfBtn').onclick = () => {
+  $('sheet').classList.remove('on');
+  requestKeyframe();
+  toast('запрошен ключевой кадр');
+};
+
+$('closeBtn').onclick = () => endSession(true);
+
+// ─────────── сессия ───────────
+async function connect() {
+  const raw = $('target').value.replace(/\D/g, '');
+  if (raw.length !== 9) { toast('ID — девять цифр'); return; }
+
+  const button = $('go');
+  button.disabled = true;
+  state.password = $('password').value || '';
+
+  try {
+    await ensureRegistered();
+
+    const d = await api('POST', '/api/v1/session/request', { target_id: raw });
+    state.sid = d.session_id;
+    state.since = 0;
+    state.offerSent = false;
+
+    $('peer').textContent = d.target && d.target.name ? d.target.name : fmtId(raw);
+    $('gate').style.display = 'none';
+    $('stage').classList.add('on');
+    setDot('warn');
+
+    toast('заявка отправлена, ждём подтверждения', 3000);
+    startLoop();
+  } catch (e) {
+    button.disabled = false;
+    toast(describeError(e), 3200);
+  }
+}
+
+function describeError(e) {
+  const map = {
+    not_found: 'устройство с таким ID не найдено',
+    offline: 'устройство не в сети',
+    busy: 'устройство занято',
+    unauthorized: 'сервер отклонил устройство',
+    session_ended: 'сессия закрыта',
+  };
+  return map[e.code] || (e.message2 || e.message || 'не удалось подключиться');
+}
+
+function startLoop() {
+  stopLoop();
+  state.loop = setInterval(tick, 700);
+  tick();
+}
+
+function stopLoop() {
+  if (state.loop) clearInterval(state.loop);
+  state.loop = null;
+}
+
+async function tick() {
+  if (!state.sid || state.ticking) return;
+
+  state.ticking = true;
+
+  try {
+    if (Date.now() - state.lastPresence > 10000) {
+      state.lastPresence = Date.now();
+      api('POST', '/api/v1/presence').catch(() => {});
+    }
+
+    const p = await api('GET', `/api/v1/session/poll?session_id=${state.sid}&since=${state.since}`);
+    state.since = p.cursor;
+
+    for (const msg of p.messages) {
+      await handleSignal(msg);
+    }
+
+    if (p.session.state === 'active' && !state.offerSent && !state.offering) {
+      await startOffer();
+    }
+
+    if (p.session.state === 'ended') {
+      toast('сессия завершена', 2600);
+      endSession(false);
+    }
+  } catch (e) {
+    if (e.code === 'session_ended' || e.code === 'not_found') {
+      toast('сессия завершена', 2600);
+      endSession(false);
+    } else {
+      state.lastError = 'tick: ' + (e.message || e.code);
+      note(state.lastError);
+    }
+  } finally {
+    state.ticking = false;
+  }
+}
+
+async function handleSignal(msg) {
+  const payload = msg.payload || {};
+
+  switch (msg.type) {
+    case 'challenge': {
+      const password = state.password || window.prompt('Пароль устройства') || '';
+      state.password = password;
+
+      if (!password) {
+        toast('без пароля не подключиться');
+        return;
+      }
+
+      try {
+        const proof = await makeProof(password, payload.salt, payload.iterations, payload.nonce);
+        await api('POST', '/api/v1/session/signal', {
+          session_id: state.sid, type: 'auth', payload: { proof },
+        });
+      } catch (e) {
+        toast('не удалось посчитать пароль: ' + e.message);
+      }
+      break;
+    }
+
+    case 'auth_failed':
+      state.password = '';
+      toast('неверный пароль устройства', 3000);
+      break;
+
+    case 'answer':
+      state.answerSdp = payload.sdp || null;
+      note('answer ' + (payload.sdp ? payload.sdp.length + ' байт' : 'пусто'));
+
+      if (payload.sdp) {
+        if (state.pc) {
+          state.pendingAnswer = null;
+          try {
+            await state.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
+            note('remote answer ok');
+          } catch (err) {
+            state.lastError = 'setRemote: ' + err.message;
+            note(state.lastError);
+          }
+        } else {
+          state.pendingAnswer = payload.sdp;
+        }
+      }
+      break;
+
+    case 'ice':
+      if (state.pc && payload && payload.candidate) {
+        try { await state.pc.addIceCandidate(payload); } catch (e) { /* поздние кандидаты */ }
+      }
+      break;
+  }
+}
+
+async function endSession(sendEnd) {
+  stopLoop();
+
+  if (sendEnd && state.sid) {
+    api('POST', '/api/v1/session/answer', { session_id: state.sid, action: 'end' }).catch(() => {});
+  }
+
+  if (state.dc) { try { state.dc.close(); } catch (e) { } }
+  if (state.pc) { try { state.pc.close(); } catch (e) { } }
+
+  state.pc = null;
+  state.dc = null;
+  state.sid = null;
+  state.offerSent = false;
+
+  frameW = 0; frameH = 0; frameCount = 0;
+  pendingFrame = null;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  $('stage').classList.remove('on');
+  $('sheet').classList.remove('on');
+  $('gate').style.display = 'flex';
+  $('go').disabled = false;
+  $('password').value = '';
+}
+
+// ─────────── статистика кадров → адаптивный битрейт ───────────
+setInterval(() => {
+  if (!state.dc || state.dc.readyState !== 'open') return;
+
+  const stats = null;
+  const total = frameCount;
+
+  if (state.lastFrameAt && total > state.lastFrames) {
+    const fps = (total - state.lastFrames) / ((Date.now() - state.lastFrameAt) / 1000);
+    send({ t: 'stat', fps: Math.round(fps * 10) / 10, kbps: 0 });
+  }
+
+  state.lastFrames = total;
+  state.lastFrameAt = Date.now();
+}, 5000);
+
+// ─────────── запуск ───────────
+$('go').onclick = connect;
+$('target').addEventListener('input', (e) => {
+  const digits = e.target.value.replace(/\D/g, '').slice(0, 9);
+  e.target.value = digits.replace(/(\d{3})(\d{3})?(\d{3})?/, (m, a, b, c) => [a, b, c].filter(Boolean).join(' '));
+});
+
+ensureRegistered().catch((e) => {
+  $('myline').textContent = 'нет связи с сервером';
+  toast('сервер недоступен: ' + e.message, 4000);
+});
+
+window.addEventListener('beforeunload', () => { if (state.sid) endSession(true); });
+
+// диагностика для отладки в браузере
+window.__fd = state;
+window.__fdState = () => ({
+  pc: state.pc ? state.pc.connectionState : null,
+  ice: state.pc ? state.pc.iceConnectionState : null,
+  sig: state.pc ? state.pc.signalingState : null,
+  dc: state.dc ? state.dc.readyState : null,
+  video: { w: frameW, h: frameH, frames: frameCount },
+  error: state.lastError,
+  log: state.log.slice(-12),
+  answer: state.answerSdp ? state.answerSdp.slice(0, 600) : null,
+});
+</script>
+</body>
+</html>

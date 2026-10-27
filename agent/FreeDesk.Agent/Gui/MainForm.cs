@@ -626,6 +626,18 @@ public sealed class MainForm : ModernWindow
 
     private void Activate(ViewerTab tab)
     {
+        // RefreshTabs пересоздаёт чипы: делаем это не внутри обработчика мыши
+        // самого чипа, иначе первый клик иногда «проглатывается».
+        BeginInvoke(() => ActivateNow(tab));
+    }
+
+    private void ActivateNow(ViewerTab tab)
+    {
+        if (!_sessions.Contains(tab))
+        {
+            return;
+        }
+
         _active = tab;
         RefreshTabs();
 
@@ -1529,6 +1541,11 @@ public sealed class MainForm : ModernWindow
         }
 
         CloseAllSessions();
+
+        // Полный выход: убираем иконку трея сразу, иначе после выхода остаются
+        // и иконка, и показанный ею балун-нотификация Windows.
+        _tray.Visible = false;
+
         base.OnFormClosing(e);
     }
 

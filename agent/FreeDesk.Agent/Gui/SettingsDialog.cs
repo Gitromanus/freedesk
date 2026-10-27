@@ -18,6 +18,7 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiInput _bitrateInput = new("3000");
     private readonly UiInput _widthInput = new("1920");
     private readonly UiInput _passwordInput = new("не задан");
+    private readonly UiInput _currentPasswordInput = new("текущий пароль");
     private readonly UiButton _clearPasswordBtn = new("Сбросить пароль") { Ghost = true, Radius = 10 };
     private readonly UiToggle _trayToggle = new("Сворачивать в трей\nпри закрытии окна");
     private readonly UiToggle _autostartToggle = new("Запускать при входе\nв Windows");
@@ -112,6 +113,14 @@ public sealed class SettingsDialog : ModernWindow
             : "не задан — подключение по подтверждению";
 
         y = AddField("ПАРОЛЬ ДЛЯ ДОСТУПА БЕЗ ПОДТВЕРЖДЕНИЯ", _passwordInput, y) + 2;
+
+        // Смена/сброс — только со знанием текущего пароля: зритель, оставшийся
+        // за машиной без владельца, не сможет скрыто завладеть доступом.
+        if (config.HasUnattendedPassword)
+        {
+            _currentPasswordInput.Box.UseSystemPasswordChar = true;
+            y = AddField("ТЕКУЩИЙ ПАРОЛЬ (ДЛЯ СМЕНЫ ИЛИ СБРОСА)", _currentPasswordInput, y) + 2;
+        }
 
         _clearPasswordBtn.Location = new Point(x, y);
         _clearPasswordBtn.Size = new Size(180, 34);
@@ -268,6 +277,19 @@ public sealed class SettingsDialog : ModernWindow
         {
             Flash("пароль: не короче 6 символов (или оставьте поле пустым)");
             return false;
+        }
+
+        // смена/сброс — только со знанием текущего пароля устройства
+        var changingPassword = _clearPassword || newPassword.Length > 0;
+        if (changingPassword && _config.HasUnattendedPassword)
+        {
+            var current = _config.GetUnattendedSecret();
+            if (current is null || !UnattendedAuth.MatchesStored(_currentPasswordInput.InputText, current))
+            {
+                Flash("смена/сброс пароля требуют текущий пароль устройства");
+                _currentPasswordInput.Box.Focus();
+                return false;
+            }
         }
 
         _config.Name = name;

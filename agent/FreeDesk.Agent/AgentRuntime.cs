@@ -131,12 +131,13 @@ public sealed class AgentRuntime
                 continue;
             }
 
-            // Пароль устройства важнее любого подтверждения: спрашиваем криптографию.
-            // Битый хеш в конфиге (нет соли и т.п.) — не повод зависнуть: тогда работает
-            // обычный путь с подтверждением человеком.
+            // Пароль устройства и подтверждение владельца работают параллельно:
+            // зритель входит и по паролю (challenge), и по согласию человека —
+            // кто решит первым, тот и пускает.
             if (_config.GetUnattendedSecret() is { } secret)
             {
                 await SendChallengeAsync(item, secret, ct);
+                _ = PromptOwnerForAsync(item);
                 continue;
             }
 
@@ -207,6 +208,48 @@ public sealed class AgentRuntime
         }, ct);
     }
 
+    /// <summary>
+    /// Параллельно с challenge спрашивает владельца «пустить/не пустить»:
+    /// сессия принимается тем путём, который сработает первым.
+    /// </summary>
+    private async Task PromptOwnerForAsync(IncomingItem item)
+    {
+        try
+        {
+            if (AcceptPrompt is null || !_prompted.Add(item.SessionId))
+            {
+                return;
+            }
+
+            Log.Info($"запрос подтверждения: {item.From.Name} ({item.SessionId})");
+
+            var accept = await AcceptPrompt(item);
+
+            // пока окно было открыто, сессию мог принять пароль
+            if (_sessions.ContainsKey(item.SessionId))
+            {
+                return;
+            }
+
+            _auth.Remove(item.SessionId);
+            _prompted.Remove(item.SessionId);
+
+            if (accept)
+            {
+                await AcceptAsync(item, CancellationToken.None);
+            }
+            else
+            {
+                Log.Info($"отклонено владельцем: {item.From.Name} ({item.From.PublicId})");
+                await TryAnswerAsync(item.SessionId, "reject", CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"диалог подтверждения: {ex.Message}");
+        }
+    }
+
     /// <summary>Ждёт ответ на challenge; проверяет proof и принимает сессию сама.</summary>
     private async Task HandleAuthAsync(CancellationToken ct)
     {
@@ -215,6 +258,14 @@ public sealed class AgentRuntime
             if (DateTime.UtcNow > auth.ExpiresAt)
             {
                 _auth.Remove(sessionId);
+
+                // Диалог владельца ещё открыт — сессию не рвём: примет владелец.
+                if (_prompted.Contains(sessionId))
+                {
+                    Log.Info($"пароль не введён, ждём решения владельца: {auth.Item.From.Name}");
+                    continue;
+                }
+
                 Log.Warn($"пароль не введён за минуту: {auth.Item.From.Name}");
                 await TryAnswerAsync(sessionId, "reject", ct);
                 continue;
@@ -333,10 +384,15 @@ public sealed class AgentRuntime
 
     private async Task AcceptAsync(IncomingItem item, CancellationToken ct)
     {
-        await _client.AnswerAsync(item.SessionId, "accept", ct);
-        Log.Info($"подключение принято: {item.From.Name} ({item.From.PublicId}), сессия {item.SessionId}");
+        // мог быть принят параллельным путём (пароль или владелец)
+        if (_sessions.ContainsKey(item.SessionId))
+        {
+            return;
+        }
 
-        var session = new ActiveSession
+        // заглушка сразу: между answer и заполнением сессии нет зазора для
+        // повторного прихода той же заявки из HandleIncoming
+        _sessions[item.SessionId] = new ActiveSession
         {
             Id = item.SessionId,
             Role = "guest",
@@ -344,9 +400,21 @@ public sealed class AgentRuntime
             State = "active",
         };
 
+        _auth.Remove(item.SessionId);
+        _prompted.Remove(item.SessionId);
+
+        await _client.AnswerAsync(item.SessionId, "accept", ct);
+        Log.Info($"подключение принято: {item.From.Name} ({item.From.PublicId}), сессия {item.SessionId}");
+
         // Транспорт создаём при получении offer: только тогда известен кодек зрителя
         // (его трек должен совпасть с нашей m-line).
-        _sessions[item.SessionId] = session;
+        _sessions[item.SessionId] = new ActiveSession
+        {
+            Id = item.SessionId,
+            Role = "guest",
+            PeerName = item.From.Name,
+            State = "active",
+        };
     }
 
     private void AttachTransport(ActiveSession session, bool offerer, VideoCodec codec)
@@ -369,7 +437,7 @@ public sealed class AgentRuntime
             Log.Info($"канал установлен: {session.PeerName}");
             session.Streamer = new ScreenStreamer(
                 peer, _config.Fps, _config.JpegQuality, _config.MaxWidth, _config.Capture, _config.BitrateKbps,
-                _config.Display);
+                _config.Display, session.DataChannelVideo);
             session.Streamer.Start();
             StatusChanged?.Invoke($"Подключено: {session.PeerName}");
             SessionStarted?.Invoke();
@@ -483,9 +551,20 @@ public sealed class AgentRuntime
             case "offer":
                 var offerCodec = ReadCodec(message.Payload);
 
+                // Браузерный зритель: видео пойдёт JPEG-ом по data channel.
+                // SDP при этом договариваем как H.264 — браузер его и предлагает.
+                var dataChannelVideo = offerCodec == VideoCodec.JpgData;
+
+                if (dataChannelVideo)
+                {
+                    offerCodec = VideoCodec.H264;
+                }
+
+                session.DataChannelVideo = dataChannelVideo;
+
                 // Кодек выбрал зритель; если у нас нет кодека — лучше закрыть сессию
                 // с внятной причиной, чем показывать чёрный/пустой экран.
-                if (offerCodec == VideoCodec.H264 && !H264Decoder.IsAvailable())
+                if (offerCodec == VideoCodec.H264 && !dataChannelVideo && !H264Decoder.IsAvailable())
                 {
                     Log.Error("нет openh264.dll — H.264 невозможен, закрываю сессию");
                     StatusChanged?.Invoke("Нет openh264.dll рядом с exe — положите файл и повторите");
@@ -804,5 +883,8 @@ public sealed class AgentRuntime
         public ClipboardSync Clipboard { get; } = new();
         public FileReceiver Files { get; } = new();
         public FileSender? Sender { get; set; }
+
+        /// <summary>Кадры идут JPEG-ом по data channel (браузерный зритель), а не по RTP.</summary>
+        public bool DataChannelVideo { get; set; }
     }
 }

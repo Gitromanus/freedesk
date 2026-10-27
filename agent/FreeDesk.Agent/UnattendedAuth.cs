@@ -43,6 +43,22 @@ public static class UnattendedAuth
 
     public static string NewNonce() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(NonceBytes));
 
+    /// <summary>
+    /// Проверяет, что пароль соответствует сохранённому хешу — используется
+    /// при смене/снятии пароля: без знания текущего сменить его нельзя.
+    /// </summary>
+    public static bool MatchesStored(string password, Secret secret)
+    {
+        if (string.IsNullOrEmpty(password))
+        {
+            return false;
+        }
+
+        var actual = Derive(password, secret.Salt, secret.Iterations);
+        return actual.Length == secret.Hash.Length &&
+               CryptographicOperations.FixedTimeEquals(actual, secret.Hash);
+    }
+
     /// <summary>Ответ зрителя: PBKDF2 от сохранённого хеша и nonce хоста.</summary>
     public static string ComputeProof(byte[] secretHash, string nonce, int iterations) =>
         Convert.ToBase64String(Rfc2898DeriveBytes.Pbkdf2(

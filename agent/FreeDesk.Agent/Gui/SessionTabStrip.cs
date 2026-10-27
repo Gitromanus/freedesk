@@ -36,6 +36,8 @@ public sealed class SessionTabStrip : DoubleBufferedPanel
         BackColor = Ui.Bg;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        // двойной клик не должен «съедать» второй MouseUp: каждый клик = активация
+        SetStyle(ControlStyles.StandardDoubleClick, false);
     }
 
     public void SetTabs(IReadOnlyList<TabInfo> tabs, int activeIndex)
@@ -133,6 +135,8 @@ public sealed class TabChip : Control
 
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
                  ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+        // два быстрых клика = два клика, а не один double-click без MouseUp
+        SetStyle(ControlStyles.StandardDoubleClick, false);
         Cursor = Cursors.Hand;
     }
 
