@@ -574,6 +574,14 @@ public sealed class AgentRuntime
 
                 AttachTransportIfNeeded(session, offerCodec);
                 var answer = await session.Transport!.CreateAnswerAsync(message.Payload, ct);
+
+                // Сообщаем зрителю, какой режим мы поняли: новый веб-клиент по этому полю
+                // отличает «хост старый» от «что-то с сетью».
+                if (answer is Dictionary<string, object?> answerFields)
+                {
+                    answerFields["echo"] = session.DataChannelVideo ? "jpgdata" : offerCodec.ToWire();
+                }
+
                 await _client.SignalAsync(session.Id, "answer", answer, ct);
                 Log.Info($"offer получен ({offerCodec.ToWire()}), answer отправлен: {session.PeerName}");
                 break;

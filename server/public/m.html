@@ -771,6 +771,7 @@ async function connect() {
 
     toast('заявка отправлена, ждём подтверждения', 3000);
     banner('Подтвердите подключение на компьютере — на его экране появится окно. Если у устройства задан пароль, подтверждение не нужно.');
+    startConnectWatch();
     startLoop();
   } catch (e) {
     button.disabled = false;
@@ -872,7 +873,14 @@ async function handleSignal(msg) {
 
     case 'answer':
       state.answerSdp = payload.sdp || null;
-      note('answer ' + (payload.sdp ? payload.sdp.length + ' байт' : 'пусто'));
+      note('answer ' + (payload.sdp ? payload.sdp.length + ' байт' : 'пусто') + ', echo=' + payload.echo);
+
+      // хост новой сборки подтверждает, что понял браузерный режим
+      if (payload.echo && payload.echo !== 'jpgdata') {
+        banner('Компьютер отдаёт экран в другом режиме (' + payload.echo + '). Обновите FreeDesk на компьютере — нужна сборка с поддержкой браузера.');
+      } else if (!payload.echo) {
+        banner('Похоже, на компьютере старая версия FreeDesk: подключение из браузера она не умеет. Скачайте свежую с сайта и перезапустите.');
+      }
 
       if (payload.sdp) {
         if (state.pc) {
@@ -883,6 +891,7 @@ async function handleSignal(msg) {
           } catch (err) {
             state.lastError = 'setRemote: ' + err.message;
             note(state.lastError);
+            banner('Не удалось согласовать видео с компьютером. Скорее всего, на нём старая версия FreeDesk — обновите её и попробуйте снова.');
           }
         } else {
           state.pendingAnswer = payload.sdp;
@@ -905,8 +914,19 @@ function startFrameWatch() {
   startFrameWatch._t = setTimeout(() => {
     if (!state.sid || frameCount > 0) return;
 
-    banner('Кадры не приходят. Обычно это старая версия FreeDesk на компьютере — скачайте свежую с сайта. Если версия новая, нажмите «Обновить кадр» в меню.');
+    banner('Кадры не приходят, хотя соединение есть. Проверьте версию FreeDesk на компьютере (нужна сборка от 27.10 или новее) и нажмите «Обновить кадр» в меню.');
   }, 12000);
+}
+
+/** Соединение не поднялось вовсе — тоже скажем вслух. */
+function startConnectWatch() {
+  clearTimeout(startConnectWatch._t);
+  startConnectWatch._t = setTimeout(() => {
+    if (!state.sid) return;
+    if (state.dc && state.dc.readyState === 'open') return;
+
+    banner('Компьютер не отвечает на подключение. Проверьте, что FreeDesk на нём запущен, а версия — не старше 27.10: в старых сборках браузерный режим не работает.');
+  }, 20000);
 }
 
 async function endSession(sendEnd) {
