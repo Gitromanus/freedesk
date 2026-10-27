@@ -92,6 +92,7 @@
   .dot{width:8px; height:8px; border-radius:50%; background:var(--ok); box-shadow:0 0 10px var(--ok); flex:none}
   .topbar__name{font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
   .topbar__sp{flex:1}
+  .net{font-size:11.5px; color:var(--warn); white-space:nowrap}
   .icon{
     width:42px; height:42px; border-radius:50%; display:grid; place-items:center;
     background:rgba(255,255,255,.08); border:1px solid var(--border); color:var(--text);
@@ -180,6 +181,7 @@
   <div class="topbar">
     <span class="dot" id="dot"></span>
     <span class="topbar__name" id="peer">подключение…</span>
+    <span class="net" id="net"></span>
     <span class="topbar__sp"></span>
     <button class="icon" id="menuBtn" aria-label="Меню">⋯</button>
   </div>
@@ -377,7 +379,14 @@ const RTC_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
+    // Публичный TURN: без него мобильный оператор + домашний NAT часто не сходятся
+    {
+      urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443'],
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
   ],
+  iceCandidatePoolSize: 2,
 };
 
 async function startOffer(target) {
@@ -414,7 +423,17 @@ async function startOffer(target) {
   };
 
   pc.oniceconnectionstatechange = () => {
-    if (pc.iceConnectionState === 'failed') toast('сеть: не удалось установить прямой канал');
+    const st = pc.iceConnectionState;
+    const net = $('net');
+
+    if (st === 'checking') { net.textContent = 'проверка сети…'; }
+    else if (st === 'connected' || st === 'completed') { net.textContent = ''; }
+    else if (st === 'failed') { net.textContent = 'сеть не сошлась'; }
+    else if (st === 'disconnected') { net.textContent = 'связь пропала'; }
+
+    note('ice: ' + st);
+
+    if (st === 'failed') toast('сеть: не удалось установить прямой канал', 3000);
   };
 
   // канал управления создаёт зритель — хост слушает имя «freedesk»
@@ -425,18 +444,26 @@ async function startOffer(target) {
   dc.onclose = () => setDot('warn');
   dc.onmessage = (ev) => { if (ev.data instanceof ArrayBuffer) onFramePacket(ev.data); };
 
+  // ICE-кандидаты шлём сразу по сигнальному каналу (trickle):
+  // если ждать полного сбора, на мобильной сети в SDP остаются только локальные адреса.
+  pc.onicecandidate = (e) => {
+    if (!e.candidate || !state.sid) return;
+
+    const c = e.candidate.toJSON ? e.candidate.toJSON() : e.candidate;
+    note('ice → ' + (c.candidate || '').split(' ').slice(4, 6).join(' '));
+
+    api('POST', '/api/v1/session/signal', {
+      session_id: state.sid, type: 'ice', payload: c,
+    }).catch(() => { });
+  };
+
+  pc.onsignalingstatechange = () => note('sig: ' + pc.signalingState);
+  pc.onicegatheringstatechange = () => note('gather: ' + pc.iceGatheringState);
+
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  // ждём сбора ICE: без trickle проще и надёжнее на мобильной сети
-  await new Promise((resolve) => {
-    if (pc.iceGatheringState === 'complete') return resolve();
-    const timer = setTimeout(resolve, 2500);
-    pc.onicegatheringstatechange = () => {
-      if (pc.iceGatheringState === 'complete') { clearTimeout(timer); resolve(); }
-    };
-  });
-
+  // отправляем оффер сразу — остальные кандидаты доедут отдельными сигналами
   await api('POST', '/api/v1/session/signal', {
     session_id: state.sid,
     type: 'offer',
