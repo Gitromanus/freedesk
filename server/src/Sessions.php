@@ -283,4 +283,20 @@ final class Sessions
 
         return $sid;
     }
+
+    /**
+     * Проверка для резервного канала: сессия существует и устройство — её участник.
+     * Возвращает нормализованный id сессии.
+     */
+    public static function requireParticipant(int $deviceId, string $sid): string
+    {
+        $sid = self::requireSid($sid);
+        $session = self::load($sid);
+
+        if ((int) $session['from_device'] !== $deviceId && (int) $session['to_device'] !== $deviceId) {
+            throw new ApiError('forbidden', 'not a participant of this session', 403);
+        }
+
+        return $sid;
+    }
 }

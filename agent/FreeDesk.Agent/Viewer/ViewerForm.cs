@@ -15,6 +15,7 @@ namespace FreeDesk.Agent.Viewer;
 public sealed class ViewerForm : ModernWindow
 {
     private readonly ViewerSession _session;
+    private FileTransferWindow? _transferWindow;
 
     private readonly Panel _canvas = new() { Dock = DockStyle.Fill, BackColor = Ui.Bg };
 
@@ -42,6 +43,12 @@ public sealed class ViewerForm : ModernWindow
     private int _scheduled;
     private int _rendered;
     private bool _dirty;
+    private PointF? _pendingMove;
+    private bool _fitted;
+
+    /// <summary>Подогнать окно под разрешение удалённого экрана при подключении
+    /// (больше моего — сжать, меньше — растянуть до оригинала). Из настроек.</summary>
+    public bool AutoFitWindow { get; set; } = true;
 
     /// <summary>Нажали «отключиться» во встроенном режиме — решает владелец окна.</summary>
     public event Action? DisconnectRequested;
@@ -87,9 +94,18 @@ public sealed class ViewerForm : ModernWindow
         _canvas.Paint += (_, e) =>
         {
             if (_current is null) return;
-            e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+
+            var rect = ImageRectangle();
+
+            // Дешёвая интерполяция: HighQualityBicubic на каждом кадре забивал
+            // поток интерфейса — на живом экране клики по вкладкам и панели
+            // «пропадали». На 1:1 фильтр не нужен вовсе.
+            e.Graphics.InterpolationMode =
+                rect.Width == _current.Width && rect.Height == _current.Height
+                    ? InterpolationMode.NearestNeighbor
+                    : InterpolationMode.Bilinear;
             e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
-            e.Graphics.DrawImage(_current, ImageRectangle());
+            e.Graphics.DrawImage(_current, rect);
         };
 
         _session.FrameDecoded += OnFrame;
@@ -99,6 +115,14 @@ public sealed class ViewerForm : ModernWindow
         var displayTimer = new System.Windows.Forms.Timer { Interval = 33 };
         displayTimer.Tick += (_, _) =>
         {
+            // Движение мыши уходит не чаще 30 раз в секунду: в релей-режиме
+            // каждое движение — отдельный HTTPS-запрос, лить их сотнями нельзя.
+            if (_pendingMove is { } move && !IsDisposed)
+            {
+                _pendingMove = null;
+                SendInput(new { t = "m", x = (double) move.X, y = (double) move.Y });
+            }
+
             if (_dirty && !IsDisposed)
             {
                 _dirty = false;
@@ -134,7 +158,7 @@ public sealed class ViewerForm : ModernWindow
         _powerBtn.Click += RequestDisconnect;
 
         _fileBtn.TabStop = false;
-        _fileBtn.Click += ShowFileMenu;
+        _fileBtn.Click += ShowTransferWindow;
 
         // порядок: [мониторы…] [файл] [отключиться] [свернуть]
         _bar.Controls.Add(_fileBtn);
@@ -296,7 +320,43 @@ public sealed class ViewerForm : ModernWindow
             _displays = displays;
             _activeDisplay = active;
             RebuildDisplayButtons();
+
+            // Родное разрешение узнали — раз подгоняем окно (один раз за сессию).
+            if (!_fitted && AutoFitWindow && displays.Count > 0)
+            {
+                _fitted = true;
+                var display = displays.FirstOrDefault(d => d.Index == active) ?? displays[0];
+                FitWindowTo(display.Width, display.Height);
+            }
         });
+    }
+
+    /// <summary>Окно под удалённый экран: больше моего — сжимаем до рабочего стола,
+    /// меньше — растягиваем до оригинала.</summary>
+    private void FitWindowTo(int remoteWidth, int remoteHeight)
+    {
+        if (remoteWidth <= 0 || remoteHeight <= 0 || WindowState != FormWindowState.Normal)
+        {
+            return;
+        }
+
+        var work = Screen.FromControl(this).WorkingArea;
+        var scale = Math.Min(1.0, Math.Min(work.Width / (double) remoteWidth, work.Height / (double) remoteHeight));
+        var canvas = new Size((int) Math.Round(remoteWidth * scale), (int) Math.Round(remoteHeight * scale));
+
+        if (TopLevel)
+        {
+            // Отдельное окно (--view): клиентская область = экран + своя шапка.
+            ClientSize = new Size(canvas.Width, canvas.Height + CaptionHeight);
+        }
+        else if (ParentForm is MainForm main)
+        {
+            main.FitViewerTo(canvas, work);
+        }
+
+        Location = new Point(
+            Math.Max(work.Left, work.Left + (work.Width - Width) / 2),
+            Math.Max(work.Top, work.Top + (work.Height - Height) / 2));
     }
 
     private void RebuildDisplayButtons()
@@ -383,64 +443,20 @@ public sealed class ViewerForm : ModernWindow
         _dirty = true;
     }
 
-    /// <summary>Меню файла: отдать или забрать.</summary>
-    private void ShowFileMenu()
+    /// <summary>Двухпанельное окно: файлы обеих машин, отправить/забрать, проценты.</summary>
+    private void ShowTransferWindow()
     {
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Отправить файл…", null, (_, _) => PickAndSendFile());
-        menu.Items.Add("Скачать файл…", null, (_, _) => PickAndDownloadFile());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Открыть папку приёма", null, (_, _) => OpenDownloads());
-        menu.Show(_bar, new Point(_fileBtn.Left, _bar.Height + 4));
-    }
-
-    /// <summary>Выбрать файл и отправить его на удалённую машину.</summary>
-    private void PickAndSendFile()
-    {
-        using var dialog = new OpenFileDialog
+        if (_transferWindow is null || _transferWindow.IsDisposed)
         {
-            Title = "Передать файл",
-            CheckFileExists = true,
-            Multiselect = false,
-        };
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+            _transferWindow = new FileTransferWindow(_session);
+            _transferWindow.Show(this);
+        }
+        else
         {
-            return;
+            _transferWindow.Activate();
         }
 
-        _ = _session.SendFileAsync(dialog.FileName);
-        _canvas.Focus();
-    }
-
-    /// <summary>Папка, куда падают принятые файлы — открываем проводник.</summary>
-    private static void OpenDownloads()
-    {
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = Files.FileWire.Downloads,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            Log.Warn($"не удалось открыть папку: {ex.Message}");
-        }
-    }
-
-    /// <summary>Выбор файла на удалённой машине — список каталогов, без ручного ввода пути.</summary>
-    private void PickAndDownloadFile()
-    {
-        using var dialog = new RemoteFileDialog(_session, Files.FileWire.Downloads);
-
-        if (dialog.ShowDialog(this) == DialogResult.OK && dialog.SelectedPath is { Length: > 0 } path)
-        {
-            _session.RequestDownload(path);
-        }
-
-        _canvas.Focus();
+        Focus();
     }
 
     private void RequestDisconnect()    {
@@ -459,10 +475,10 @@ public sealed class ViewerForm : ModernWindow
 
         if (rect.Width <= 0 || rect.Height <= 0) return;
 
-        var x = Math.Clamp((double)(e.X - rect.X) / rect.Width, 0, 1);
-        var y = Math.Clamp((double)(e.Y - rect.Y) / rect.Height, 0, 1);
-
-        SendInput(new { t = "m", x, y });
+        // Не шлём сразу: последняя позиция уйдёт с ближайшим тиком таймера.
+        _pendingMove = new PointF(
+            (float) Math.Clamp((e.X - rect.X) / (double) rect.Width, 0, 1),
+            (float) Math.Clamp((e.Y - rect.Y) / (double) rect.Height, 0, 1));
     }
 
     private void SendButton(MouseButtons button, bool down)

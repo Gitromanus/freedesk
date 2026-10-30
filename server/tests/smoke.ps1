@@ -102,6 +102,41 @@ $offer = @($pollB.messages | Where-Object { $_.type -eq 'offer' })
 if ($offer.Count -ne 1) { throw 'B did not receive the offer signal' }
 Step 'signal offer' ("cursor={0} payload.type={1}" -f $pollB.cursor, $offer[0].payload.type)
 
+# ── резервный канал: кадры и ввод мимо NAT, через сервер ──
+
+function Invoke-Raw {
+    param([string]$Method, [string]$Path, [byte[]]$Bytes, [string]$Token = '')
+    $headers = @{}
+    if ($Token) { $headers['Authorization'] = "Bearer $Token" }
+    return Invoke-WebRequest -Method $Method -Uri ($Base.TrimEnd('/') + $Path) -Headers $headers `
+        -Body $Bytes -ContentType 'image/jpeg' -UseBasicParsing -TimeoutSec 30
+}
+
+# Сервер тело кадра не декодирует — важен только размер (64…200 КБ).
+$frameBytes = New-Object byte[] 100
+(New-Object Random).NextBytes($frameBytes)
+
+$posted = Invoke-Raw -Method POST -Path "/api/v1/relay/frame?session_id=$sid" -Bytes $frameBytes -Token $a.device_token
+Step 'relay frame post' $posted.StatusCode
+
+$img = Invoke-Raw -Method GET -Path "/api/v1/relay/image?session_id=$sid&since=0&wait=0" -Token $b.device_token
+if ($img.Headers['Content-Type'] -notlike 'image/jpeg*') { throw 'relay image is not jpeg' }
+if (@($img.Headers['X-Frame-Seq'])[0] -ne '1') { throw 'relay image seq mismatch' }
+if ($img.RawContentLength -ne 100) { throw 'relay image body truncated' }
+Step 'relay image' ("seq={0} bytes={1}" -f @($img.Headers['X-Frame-Seq'])[0], $img.RawContentLength)
+
+$unchanged = Invoke-Api -Method GET -Path "/api/v1/relay/image?session_id=$sid&since=1&wait=0" -Token $b.device_token
+if ($unchanged.changed) { throw 'relay frame should be unchanged' }
+Step 'relay image unchanged' ("seq={0}" -f $unchanged.seq)
+
+Invoke-Api -Method POST -Path "/api/v1/relay/control?session_id=$sid" -Token $b.device_token -Body @{
+    event = @{ t = 'smoke'; x = 1; y = 2 }
+} | Out-Null
+
+$ctl = Invoke-Api -Method GET -Path "/api/v1/relay/control?session_id=$sid&offset=0&wait=0" -Token $a.device_token
+if (@($ctl.events).Count -ne 1) { throw 'host did not receive the relay control event' }
+Step 'relay control' ("events={0} offset={1}" -f @($ctl.events).Count, $ctl.offset)
+
 Invoke-Api -Method POST -Path '/api/v1/session/answer' -Token $a.device_token -Body @{
     session_id = $sid; action = 'end'
 } | Out-Null

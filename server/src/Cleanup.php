@@ -60,10 +60,14 @@ final class Cleanup
 
         $staleCounters = Db::exec('DELETE FROM rate_limits WHERE window_start < ?', [time() - 7200]);
 
+        // Каталоги резервного канала живут в tmp и убираются по своему TTL.
+        $relayDirs = Relay::cleanup();
+
         return [
             'expired_sessions' => $expiredSessions,
             'deleted_signals' => $staleSignals,
             'deleted_counters' => $staleCounters,
+            'relay_dirs_removed' => $relayDirs,
         ];
     }
 }

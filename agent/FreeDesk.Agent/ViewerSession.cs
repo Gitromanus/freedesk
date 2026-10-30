@@ -9,13 +9,13 @@ namespace FreeDesk.Agent;
 public sealed record RemoteDisplay(int Index, int Width, int Height, bool Primary);
 
 /// <summary>Элемент удалённого каталога (для выбора файла к скачиванию).</summary>
-public sealed record RemoteEntry(string Name, bool IsDirectory)
+public sealed record RemoteEntry(string Name, bool IsDirectory, long Size = 0, string? FullName = null)
 {
     public override string ToString() => (IsDirectory ? "[ ] " : "    ") + Name;
 }
 
-/// <summary>Ответ хоста на листинг каталога.</summary>
-public sealed record RemoteListing(string Path, string? Parent, IReadOnlyList<RemoteEntry> Entries, string? Error);
+/// <summary>Ответ хоста на листинг каталога (Desktop — путь к его рабочему столу).</summary>
+public sealed record RemoteListing(string Path, string? Parent, IReadOnlyList<RemoteEntry> Entries, string? Error, string? Desktop = null);
 
 /// <summary>Ответ на запрос пароля: сам пароль и просьба запомнить его для этого устройства.</summary>
 public sealed record PasswordReply(string Password, bool Remember);
@@ -46,6 +46,14 @@ public sealed class ViewerSession : IAsyncDisposable
     private readonly System.Diagnostics.Stopwatch _rxWatch = System.Diagnostics.Stopwatch.StartNew();
     private CancellationTokenSource? _cts;
     private int _started;
+
+    // ── резервный канал (кадры и ввод через сервер) ──
+    private bool _relayActive;
+    private int _relaySeq;
+    private DateTime _lastFrameAt = DateTime.MinValue;
+
+    /// <summary>Принудительно включить резервный канал (для проверки и для упрямых NAT).</summary>
+    public bool ForceRelay { get; set; }
     private readonly ClipboardSync _clipboard = new();
 
     /// <summary>Готовый кадр для показа (уже декодированный).</summary>
@@ -161,6 +169,21 @@ public sealed class ViewerSession : IAsyncDisposable
         }
     }
 
+    /// <summary>Работает ли резервный канал (передача файлов по data channel недоступна).</summary>
+    public bool RelayActive => _relayActive;
+
+    /// <summary>ID хоста, к которому подключены.</summary>
+    public string TargetId => _targetId;
+
+    /// <summary>Жив ли прямой data channel (для него и для передачи файлов).</summary>
+    public bool IsConnected => _peer is { IsConnected: true };
+
+    /// <summary>Прогресс отправки файла на хост: имя, отправлено, всего.</summary>
+    public event Action<string, long, long>? UploadProgress;
+
+    /// <summary>Прогресс приёма файла с хоста: id, имя, принято, всего, путь (когда готов).</summary>
+    public event Action<int, string, long, long, string?>? DownloadProgress;
+
     private async Task SendOfferAsync(CancellationToken ct)
     {
         var peer = new WebRtcPeer(offerer: true, _codec);
@@ -168,6 +191,9 @@ public sealed class ViewerSession : IAsyncDisposable
 
         _fileReceiver = new FileReceiver();
         _fileSender = new FileSender(peer, text => StatusChanged?.Invoke(text));
+
+        _fileSender.SendProgress += (name, sent, total) => UploadProgress?.Invoke(name, sent, total);
+        _fileReceiver.Progress += (id, name, written, total, path) => DownloadProgress?.Invoke(id, name, written, total, path);
 
         peer.BinaryReceived += data =>
         {
@@ -269,8 +295,34 @@ public sealed class ViewerSession : IAsyncDisposable
 
         peer.Closed += reason =>
         {
+            // Релей живёт независимо от WebRTC: падение ICE не должно убивать
+            // сессию, в которой уже работает (или вот-вот включится) резервный
+            // канал, и не должно пугать статусом «канал закрыт».
+            if (_relayActive)
+            {
+                Log.Info("прямое соединение закрыто, продолжаем через резервный канал");
+                StatusChanged?.Invoke("прямое соединение не удалось — работаем через сервер");
+                return;
+            }
+
             StatusChanged?.Invoke($"канал закрыт: {reason}");
-            Ended?.Invoke();
+
+            // Сторож ещё мог не успеть включить релей — даём ему 4 секунды.
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(4), ct);
+
+                    if (!_relayActive)
+                    {
+                        Ended?.Invoke();
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }, ct);
         };
 
         var offer = (Dictionary<string, object?>)await peer.CreateOfferAsync(ct);
@@ -278,6 +330,170 @@ public sealed class ViewerSession : IAsyncDisposable
         await _client.SignalAsync(_sessionId!, "offer", offer, ct);
         _offerSent = true;
         StatusChanged?.Invoke("offer отправлен, ждём ответ");
+
+        // Если P2P не сложится — через 8 секунд поднимаем резервный канал.
+        _ = Task.Run(() => RelayWatchdogAsync(ct), ct);
+    }
+
+    /// <summary>
+    /// Сторож: если кадры не пошли (NAT не пропустил прямое соединение),
+    /// переключаемся на доставку через сервер.
+    /// </summary>
+    private async Task RelayWatchdogAsync(CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(ForceRelay ? 1 : 8);
+
+        try
+        {
+            while (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(500, ct);
+
+                if (_lastFrameAt > DateTime.UtcNow.AddSeconds(-2))
+                {
+                    return; // кадры идут — резерв не нужен
+                }
+            }
+
+            if (_lastFrameAt > DateTime.UtcNow.AddSeconds(-2))
+            {
+                return;
+            }
+
+            await EnableRelayAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"резервный канал: {ex.Message}");
+        }
+    }
+
+    /// <summary>Включить резервный канал: попросить хост гнать кадры через сервер и принимать их.</summary>
+    private async Task EnableRelayAsync(CancellationToken ct)
+    {
+        if (_relayActive || _sessionId is null)
+        {
+            return;
+        }
+
+        _relayActive = true;
+        await _client.SignalAsync(_sessionId, "relay", new { on = true }, ct);
+        StatusChanged?.Invoke("прямое соединение не прошло — работаем через сервер (медленнее)");
+        Log.Info("резервный канал: включён");
+
+        _ = Task.Run(() => RelayReceiveLoopAsync(ct), ct);
+    }
+
+    private async Task RelayReceiveLoopAsync(CancellationToken ct)
+    {
+        var failures = 0;
+        var received = 0;
+        var dead = false;
+        var startedAt = DateTime.UtcNow;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+
+        while (!ct.IsCancellationRequested && _relayActive && _sessionId is not null)
+        {
+            try
+            {
+                // Один запрос на цикл: сервер сам скажет, новый ли кадр.
+                var (jpeg, seq) = await _client.RelayFrameAsync(_sessionId, _relaySeq, ct);
+
+                if (jpeg is { Length: > 0 })
+                {
+                    using var stream = new MemoryStream(jpeg);
+                    using var image = Image.FromStream(stream);
+                    var bitmap = new Bitmap(image);
+
+                    _relaySeq = seq;
+                    _lastFrameAt = DateTime.UtcNow;
+                    _totalFrames++;
+                    FrameDecoded?.Invoke(bitmap);
+
+                    received++;
+
+                    if (received == 1)
+                    {
+                        Log.Info($"резервный кадр: {bitmap.Width}x{bitmap.Height}");
+
+                        // Кадры релея = сессия состоялась: поднимаем «Connected»,
+                        // иначе окно просмотра так и не создаётся (ConnectAsync
+                        // ждёт именно этого события) и вкладка висит жёлтой.
+                        StatusChanged?.Invoke("подключено через резервный канал");
+                        Connected?.Invoke();
+                    }
+
+                    if (watch.Elapsed.TotalSeconds >= 10)
+                    {
+                        Log.Info($"резервный канал: получено {received / watch.Elapsed.TotalSeconds:F1} fps");
+                        received = 0;
+                        watch.Restart();
+                    }
+                }
+                else if (_lastFrameAt < DateTime.UtcNow.AddSeconds(-15)
+                         && (DateTime.UtcNow - startedAt).TotalSeconds > 15)
+                {
+                    // Релей включён, но хост не гонит кадры (старая сборка,
+                    // упал, выключился) — не висим вечно на чёрном экране.
+                    StatusChanged?.Invoke("резервный канал не отвечает");
+                    Log.Warn("резервный канал: кадров нет 15 секунд");
+                    dead = true;
+                    break;
+                }
+
+                failures = 0;
+
+                // Темп задаёт long-poll на сервере: вернулся сразу — есть новый кадр,
+                // подождал 5 секунд — экран не менялся, запрашиваем снова.
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                failures++;
+                Log.Warn($"резервный канал: {ex.Message}");
+
+                if (failures >= 5)
+                {
+                    StatusChanged?.Invoke("резервный канал не отвечает");
+                    dead = true;
+                    break;
+                }
+
+                await Task.Delay(1000, ct);
+            }
+        }
+
+        if (dead)
+        {
+            await EndOnServerAsync();
+            Ended?.Invoke();
+        }
+    }
+
+    /// <summary>Сообщить серверу, что сессия окончена (хост в релей-режиме узнаёт
+    /// о закрытии только отсюда — мёртвый P2P ему ничего не скажет).</summary>
+    private async Task EndOnServerAsync()
+    {
+        if (_sessionId is null)
+        {
+            return;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await _client.AnswerAsync(_sessionId, "end", timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"сессия не закрыта на сервере: {ex.Message}");
+        }
     }
 
     /// <summary>Хост прислал список мониторов: показываем кнопки переключения.</summary>
@@ -337,9 +553,9 @@ public sealed class ViewerSession : IAsyncDisposable
         }
     }
 
-    /// <summary>Отправить файл на удалённую машину (кнопка в панели просмотра).</summary>
-    public Task SendFileAsync(string path, CancellationToken ct = default) =>
-        _fileSender?.SendAsync(path, ct) ?? Task.CompletedTask;
+    /// <summary>Отправить файл на удалённую машину (targetDir — открытая там папка).</summary>
+    public Task SendFileAsync(string path, string? targetDir = null, CancellationToken ct = default) =>
+        _fileSender?.SendAsync(path, targetDir, ct) ?? Task.CompletedTask;
 
     /// <summary>Список каталога на хосте — для диалога выбора файла.</summary>
     public async Task<RemoteListing?> BrowseAsync(string? path, CancellationToken ct = default)
@@ -382,6 +598,9 @@ public sealed class ViewerSession : IAsyncDisposable
         var error = root.TryGetProperty("error", out var errorValue) && errorValue.ValueKind == JsonValueKind.String
             ? errorValue.GetString()
             : null;
+        var desktop = root.TryGetProperty("desktop", out var desktopValue) && desktopValue.ValueKind == JsonValueKind.String
+            ? desktopValue.GetString()
+            : null;
 
         var entries = new List<RemoteEntry>();
 
@@ -397,15 +616,19 @@ public sealed class ViewerSession : IAsyncDisposable
                 }
 
                 var isDirectory = item.TryGetProperty("d", out var dirValue) && dirValue.ValueKind == JsonValueKind.True;
-                entries.Add(new RemoteEntry(name, isDirectory));
+                var size = item.TryGetProperty("s", out var sizeValue) && sizeValue.TryGetInt64(out var parsed) ? parsed : 0;
+                var fullName = item.TryGetProperty("p", out var entryPath) && entryPath.ValueKind == JsonValueKind.String
+                    ? entryPath.GetString()
+                    : null;
+                entries.Add(new RemoteEntry(name, isDirectory, size, fullName));
             }
         }
 
-        _browse?.TrySetResult(new RemoteListing(path, parent, entries, error));
+        _browse?.TrySetResult(new RemoteListing(path, parent, entries, error, desktop));
     }
 
-    /// <summary>Попросить у хоста файл по пути и сохранить его у себя.</summary>
-    public void RequestDownload(string remotePath)
+    /// <summary>Попросить у хоста файл по пути (saveDir — куда положить у себя).</summary>
+    public void RequestDownload(string remotePath, string? saveDir = null)
     {
         if (string.IsNullOrWhiteSpace(remotePath))
         {
@@ -421,7 +644,25 @@ public sealed class ViewerSession : IAsyncDisposable
         }
 
         StatusChanged?.Invoke($"запрашиваю файл: {Path.GetFileName(remotePath)}");
-        peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "download", path = remotePath }));
+
+        object request = string.IsNullOrWhiteSpace(saveDir)
+            ? (object) new { t = "file", op = "download", path = remotePath }
+            : new { t = "file", op = "download", path = remotePath, dir = saveDir };
+
+        peer.SendControl(JsonSerializer.Serialize(request));
+    }
+
+    /// <summary>Прервать входящую передачу и сказать хосту, чтобы тот остановился.</summary>
+    public void AbortIncoming(int id)
+    {
+        _fileReceiver?.Abort(id);
+
+        var peer = _peer;
+
+        if (peer is not null && peer.IsConnected)
+        {
+            peer.SendControl(JsonSerializer.Serialize(new { t = "file", op = "cancel", id }));
+        }
     }
 
     /// <summary>Хост предложил файл — принимаем и пишем в Downloads\FreeDesk.</summary>
@@ -435,9 +676,12 @@ public sealed class ViewerSession : IAsyncDisposable
             case "offer":
                 var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "file" : "file";
                 var size = root.TryGetProperty("size", out var sizeValue) && sizeValue.TryGetInt64(out var bytes) ? bytes : 0;
+                var incomingDir = root.TryGetProperty("dir", out var incomingDirValue) && incomingDirValue.ValueKind == JsonValueKind.String
+                    ? incomingDirValue.GetString()
+                    : null;
 
                 string? startError = null;
-                var started = _fileReceiver is not null && _fileReceiver.TryStart(id, name, size, out startError);
+                var started = _fileReceiver is not null && _fileReceiver.TryStart(id, name, size, out startError, incomingDir);
 
                 if (started)
                 {
@@ -493,6 +737,9 @@ public sealed class ViewerSession : IAsyncDisposable
     private void OnRemoteFrame(byte[] frame)
     {
         _totalFrames++;
+
+        // Байты идут — сторож релея видит, что прямое соединение живо.
+        _lastFrameAt = DateTime.UtcNow;
         Bitmap? bitmap;
 
         if (_decoder is not null)
@@ -687,12 +934,27 @@ public sealed class ViewerSession : IAsyncDisposable
         Ended?.Invoke();
     }
 
-    public void SendInput(string json) => _peer?.SendControl(json);
+    public void SendInput(string json)
+    {
+        if (_relayActive && _sessionId is not null)
+        {
+            // Резервный канал: ввод идёт тем же HTTPS-путём, что и кадры.
+            _ = _client.RelayControlPushAsync(_sessionId, json, _cts?.Token ?? CancellationToken.None)
+                .ContinueWith(t => Log.Warn($"резервный ввод: {t.Exception?.GetBaseException().Message}"),
+                    TaskContinuationOptions.OnlyOnFaulted);
+            return;
+        }
+
+        _peer?.SendControl(json);
+    }
 
     public async ValueTask DisposeAsync()
     {
         _cts?.Cancel();
         _cts?.Dispose();
+
+        // В релей-режиме мёртвый P2P не скажет хосту, что мы ушли, — говорим сами.
+        await EndOnServerAsync();
 
         if (_peer is not null)
         {

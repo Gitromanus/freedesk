@@ -6,11 +6,24 @@ using FreeDesk.Agent.Codec;
 using FreeDesk.Agent.Gui;
 using FreeDesk.Agent.Viewer;
 
+// Падение любого фонового потока и непросмотренные исключения задач — в полный
+// crash-лог. Регистрируется раньше всего: если упадёт что-то между here и Main,
+// разбор будет опираться на файл, а не на обрезанный скриншот консоли.
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+    Log.Crash(e.ExceptionObject as Exception, e.IsTerminating ? "fatal" : "background");
+TaskScheduler.UnobservedTaskException += (_, e) =>
+{
+    Log.Crash(e.Exception, "unobserved-task");
+    e.SetObserved();
+};
+
+Log.Info($"запуск: {string.Join(' ', args.Length == 0 ? ["(без аргументов)"] : args)}");
+
 // GUI-сборка (WinExe) не получает консоль при запуске из терминала — цепляемся
 // к консоли родителя, чтобы флаги вроде --capture-test печатали что-нибудь.
 if (args.Length > 0)
 {
-    TryAttachParentConsole();
+    TryAttachParentConsole(args);
 }
 
 try
@@ -48,6 +61,14 @@ if (guiRequested && !args.Contains("--profile"))
 
 AgentConfig.Profile = profile;
 var config = AgentConfig.Load();
+
+// GUI при двойном клике получает от Windows свою консоль — черное окно рядом
+// с приложением выглядит багом. Прячем её, только если она создана для нас:
+// запуск из терминала (--gui, --console) консоль не трогает.
+if (guiRequested && !args.Contains("--console"))
+{
+    HideOwnedConsole();
+}
 string? connectTo = null;
 string? viewTarget = null;
 string? inputTestTarget = null;
@@ -58,6 +79,7 @@ bool clearPassword = false;
 bool guiMode = guiRequested;
 var openSettings = false;
 var startHidden = false;
+var forceRelay = false;
 var installAutostart = false;
 var removeAutostart = false;
 int? displayArg = null;
@@ -93,6 +115,9 @@ for (var i = 0; i < args.Length; i++)
             break;
         case "--gui":
             guiMode = true;
+            break;
+        case "--force-relay":
+            forceRelay = true;
             break;
         case "--settings":
             guiMode = true;
@@ -316,7 +341,7 @@ Console.WriteLine();
 
 if (viewTarget is not null)
 {
-    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config, sendFile, downloadPath);
+    return RunViewer(client, viewTarget, VideoCodecNames.Parse(config.Codec), viewPassword, displayArg, config, sendFile, downloadPath, forceRelay);
 }
 
 if (inputTestTarget is not null)
@@ -341,17 +366,26 @@ return 0;
 static string FormatId(string id) =>
     id.Length == 9 ? $"{id[..3]} {id[3..6]} {id[6..]}" : id;
 
-static void TryAttachParentConsole()
+static void TryAttachParentConsole(string[] args)
 {
-    // Уже есть консоль (консольная сборка или запуск с редиректом) — не трогаем.
+    // Уже есть консоль (запуск с редиректом или из терминала) — не трогаем.
     if (Win32.GetConsoleWindow() != IntPtr.Zero)
     {
         return;
     }
 
+    // Сборка WinExe: при двойном клике консоли нет вовсе — и не нужно.
+    // Из терминала (--console, --capture-test) цепляемся к консоли родителя.
     if (!Win32.AttachConsole(Win32.AttachParentProcess))
     {
-        return;
+        // Явный --console без терминала — создаём окно сами; иначе (двойной
+        // клик по ярлыку с флагами) тихо живём без консоли, лог — в файле.
+        if (!args.Contains("--console"))
+        {
+            return;
+        }
+
+        Win32.AllocConsole();
     }
 
     ReopenStd(-11); // STD_OUTPUT_HANDLE
@@ -391,12 +425,34 @@ static void TryAttachParentConsole()
 
 static string PickFreeProfile() => ProfilePicker.Pick();
 
+/// <summary>Прятать консоль, если она выделена процессу Windows-ом (двойной клик), а не унаследована от терминала.</summary>
+static void HideOwnedConsole()
+{
+    var hwnd = Win32.GetConsoleWindow();
+
+    if (hwnd == IntPtr.Zero)
+    {
+        return;
+    }
+
+    var list = new uint[8];
+    var count = Win32.GetConsoleProcessList(list, 8);
+
+    if (count == 1)
+    {
+        Win32.ShowWindow(hwnd, Win32.SW_HIDE);
+    }
+}
+
 static int RunViewer(
     SignalingClient client, string targetId, VideoCodec codec, string? password, int? display,
-    AgentConfig config, string? sendFile = null, string? downloadPath = null)
+    AgentConfig config, string? sendFile = null, string? downloadPath = null, bool forceRelay = false)
 {
-    var session = new ViewerSession(client, targetId, codec, password ?? string.Empty, config);
-    session.PreferredDisplay = display;
+    var session = new ViewerSession(client, targetId, codec, password ?? string.Empty, config)
+    {
+        PreferredDisplay = display,
+        ForceRelay = forceRelay,
+    };
 
     if (sendFile is not null)
     {
@@ -417,7 +473,7 @@ static int RunViewer(
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using var form = new ViewerForm(session);
+            using var form = new ViewerForm(session) { AutoFitWindow = config.FitWindowOnConnect };
             Application.Run(form);
         }
         catch (Exception ex)
@@ -510,6 +566,7 @@ static int RunGui(
 internal static class Win32
 {
     public const uint AttachParentProcess = 0xFFFFFFFF;
+    public const int SW_HIDE = 0;
 
     [DllImport("kernel32.dll")]
     public static extern bool AttachConsole(uint processId);
@@ -519,4 +576,13 @@ internal static class Win32
 
     [DllImport("kernel32.dll")]
     public static extern IntPtr GetStdHandle(int standardHandle);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int command);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetConsoleProcessList(uint[] list, uint count);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AllocConsole();
 }

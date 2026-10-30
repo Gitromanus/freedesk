@@ -21,6 +21,7 @@ public sealed class SettingsDialog : ModernWindow
     private readonly UiButton _clearPasswordBtn = new("Сбросить пароль") { Ghost = true, Radius = 10 };
     private readonly UiToggle _trayToggle = new("Сворачивать в трей\nпри закрытии окна");
     private readonly UiToggle _autostartToggle = new("Запускать при входе\nв Windows");
+    private readonly UiToggle _fitToggle = new("Подгонять окно под экран\nудалённой машины");
     private readonly UiButton _codecBtn = new("H.264 (openh264)") { Ghost = true, Radius = 10 };
     private readonly UiButton _captureBtn = new("Авто (DXGI → GDI)") { Ghost = true, Radius = 10 };
 
@@ -198,8 +199,12 @@ public sealed class SettingsDialog : ModernWindow
         _autostartToggle.Location = new Point(x + half + 12, y + 4);
         _autostartToggle.Size = new Size(half, 40);
 
-        _content.Controls.AddRange(new Control[] { _trayToggle, _autostartToggle });
-        y += 40 + 10;
+        _fitToggle.Checked = config.FitWindowOnConnect;
+        _fitToggle.Location = new Point(x, y + 4 + 50);
+        _fitToggle.Size = new Size(w - 12, 40);
+
+        _content.Controls.AddRange(new Control[] { _trayToggle, _autostartToggle, _fitToggle });
+        y += (40 + 10) * 2;
 
         var save = new UiButton("Сохранить")
         {
@@ -322,6 +327,7 @@ public sealed class SettingsDialog : ModernWindow
         }
 
         _config.MinimizeToTray = _trayToggle.Checked;
+        _config.FitWindowOnConnect = _fitToggle.Checked;
 
         if (_autostartToggle.Checked != Autostart.IsEnabled)
         {

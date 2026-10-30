@@ -65,3 +65,8 @@ public sealed class ApiException : Exception
         Status = status;
     }
 }
+
+/// <summary>Порция событий ввода из резервного канала.</summary>
+public sealed record RelayControl(
+    [property: JsonPropertyName("offset")] long Offset,
+    [property: JsonPropertyName("events")] List<string>? Events);

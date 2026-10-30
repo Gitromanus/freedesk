@@ -44,19 +44,20 @@ public sealed class SessionTabStrip : DoubleBufferedPanel
     {
         SuspendLayout();
 
-        foreach (var chip in _chips)
-        {
-            Controls.Remove(chip);
-            chip.Dispose();
-        }
+        // Чипы переиспользуем: пересоздание под курсором проглатывало клик —
+        // во время сессии статусы меняются каждые пару секунд, и вкладки
+        // приходилось нажимать дважды.
+        var reuse = _chips.Count == tabs.Count;
 
-        _chips.Clear();
-
-        if (_plus is not null)
+        if (!reuse)
         {
-            Controls.Remove(_plus);
-            _plus.Dispose();
-            _plus = null;
+            foreach (var chip in _chips)
+            {
+                Controls.Remove(chip);
+                chip.Dispose();
+            }
+
+            _chips.Clear();
         }
 
         var x = SidePadding;
@@ -66,30 +67,38 @@ public sealed class SessionTabStrip : DoubleBufferedPanel
             var index = i;
             var info = tabs[i];
 
-            var chip = new TabChip(info.Title, info.Subtitle, info.Dot, info.Active)
+            TabChip chip;
+
+            if (reuse)
             {
-                Location = new Point(x, 4),
-            };
+                chip = _chips[i];
+                chip.Update(info.Title, info.Subtitle, info.Dot, info.Active);
+            }
+            else
+            {
+                chip = new TabChip(info.Title, info.Subtitle, info.Dot, info.Active);
+                chip.Activated += () => TabActivated?.Invoke(index);
+                chip.Closed += () => TabClosed?.Invoke(index);
 
-            chip.Activated += () => TabActivated?.Invoke(index);
-            chip.Closed += () => TabClosed?.Invoke(index);
+                Controls.Add(chip);
+                _chips.Add(chip);
+            }
 
-            Controls.Add(chip);
-            _chips.Add(chip);
+            chip.Location = new Point(x, 4);
 
             x += chip.Width + Gap;
         }
 
         if (tabs.Count > 0)
         {
-            _plus = new TabChip("+", "", Ui.Muted, false, isPlus: true)
+            if (_plus is null)
             {
-                Location = new Point(x, 4),
-                Width = ChipHeight,
-            };
+                _plus = new TabChip("+", "", Ui.Muted, false, isPlus: true);
+                _plus.Activated += () => NewTabClicked?.Invoke();
+                Controls.Add(_plus);
+            }
 
-            _plus.Activated += () => NewTabClicked?.Invoke();
-            Controls.Add(_plus);
+            _plus.Location = new Point(x, 4);
         }
 
         ResumeLayout();
@@ -110,10 +119,10 @@ public sealed class SessionTabStrip : DoubleBufferedPanel
 /// <summary>Одна вкладка: точка состояния, имя, ID и крестик закрытия.</summary>
 public sealed class TabChip : Control
 {
-    private readonly string _title;
-    private readonly string _subtitle;
-    private readonly Color _dot;
-    private readonly bool _active;
+    private string _title;
+    private string _subtitle;
+    private Color _dot;
+    private bool _active;
     private readonly bool _isPlus;
 
     private bool _hover;
@@ -138,6 +147,25 @@ public sealed class TabChip : Control
         // два быстрых клика = два клика, а не один double-click без MouseUp
         SetStyle(ControlStyles.StandardDoubleClick, false);
         Cursor = Cursors.Hand;
+    }
+
+    /// <summary>Обновить содержимое без пересоздания контрола: клик по чипу
+    /// не должен теряться, когда под ним происходит обновление.</summary>
+    public void Update(string title, string subtitle, Color dot, bool active)
+    {
+        _title = title;
+        _subtitle = subtitle;
+        _dot = dot;
+        _active = active;
+
+        var width = MeasureWidth(title);
+
+        if (Width != width)
+        {
+            Width = width;
+        }
+
+        Invalidate();
     }
 
     private static int MeasureWidth(string title)

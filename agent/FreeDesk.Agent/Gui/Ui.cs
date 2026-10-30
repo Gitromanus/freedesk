@@ -138,14 +138,15 @@ public static class Ui
             CaptionGlyph.Delete => "\u2715",
             CaptionGlyph.Settings => "\u2699",
             CaptionGlyph.Monitor => "\u25A3",
-            CaptionGlyph.Power => "\u23FB",
+            // ⏻ (U+23FB) в шрифтах старых Windows нет — квадрат; ◉ есть везде.
+            CaptionGlyph.Power => "\u25C9",
             CaptionGlyph.File => "\u2191",
             _ => "?",
         };
     }
 
     public static Font GlyphFont(float size) =>
-        new(HasMdl2 ? "Segoe MDL2 Assets" : "Segoe UI", size);
+        new(HasMdl2 ? "Segoe MDL2 Assets" : "Segoe UI Symbol", size);
 }
 
 public enum CaptionGlyph
@@ -183,7 +184,7 @@ public class DoubleBufferedPanel : Panel
 public abstract class ModernWindow : Form
 {
     public const int CaptionHeight = 40;
-    private const int EdgeSize = 6;
+    private const int EdgeSize = 10;
 
     private const int HTCLIENT = 1;
     private const int HTCAPTION = 2;
@@ -397,6 +398,20 @@ public abstract class ModernWindow : Form
                 return false;
             }
 
+            if (m.Msg == WM_LBUTTONDOWN)
+            {
+                // Первый клик по неактивному окну Windows тратит на активацию —
+                // из-за этого вкладки и кнопки срабатывали со второго раза.
+                // Помогаем сразу: активируем окно, клик идёт дальше по обычному пути.
+                var target = Control.FromHandle(m.HWnd);
+
+                if (target is not null && ReferenceEquals(target.TopLevelControl, _owner) &&
+                    !_owner.ContainsFocus)
+                {
+                    _owner.Activate();
+                }
+            }
+
             if (m.Msg == WM_LBUTTONDOWN && _owner.WindowState == FormWindowState.Normal)
             {
                 if (!_owner.Bounds.Contains(Cursor.Position))
@@ -410,18 +425,6 @@ public abstract class ModernWindow : Form
                 {
                     _owner.BeginResize(edge);
                     return true;
-                }
-            }
-            else if (m.Msg == WM_LBUTTONDOWN)
-            {
-                // Первый клик по неактивному окну Windows тратит на активацию —
-                // из-за этого вкладки и кнопки срабатывали со второго раза.
-                var target = Control.FromHandle(m.HWnd);
-
-                if (target is not null && ReferenceEquals(target.TopLevelControl, _owner) &&
-                    !_owner.ContainsFocus)
-                {
-                    _owner.Activate();
                 }
             }
             else if (m.Msg == WM_MOUSEMOVE && _owner.IsResizing)

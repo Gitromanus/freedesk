@@ -32,6 +32,10 @@ public sealed class AgentRuntime
     /// <summary>Сессия закончилась — UI восстанавливается.</summary>
     public event Action? SessionEnded;
 
+    /// <summary>Ход передачи файлов в сессии: имя, передано байт, всего байт.
+    /// Пустое имя — передач закончилась, индикатор можно спрятать.</summary>
+    public event Action<string, long, long>? FileTransferActivity;
+
     /// <summary>Файл, который надо отдать зрителю сразу после подключения (--send-file).</summary>
     public string? AutoSendFile { get; set; }
 
@@ -428,6 +432,13 @@ public sealed class AgentRuntime
         session.Transport = peer;
         session.Sender = new FileSender(peer, text => StatusChanged?.Invoke(text));
 
+        // Хост видит передачу файлов у себя: и то, что забирает зритель,
+        // и то, что ему привозят, — процесс не должен идти вскрытую.
+        session.Sender.SendProgress += (name, sent, total) =>
+            FileTransferActivity?.Invoke(name, sent, total);
+        session.Files.Progress += (_, name, written, total, _) =>
+            FileTransferActivity?.Invoke(name, written, total);
+
         peer.LocalSignal += signal =>
             _ = _client.SignalAsync(session.Id, "ice", signal, CancellationToken.None);
 
@@ -491,6 +502,16 @@ public sealed class AgentRuntime
         peer.Closed += reason =>
         {
             Log.Info($"канал закрыт ({session.PeerName}): {reason}");
+
+            // Релей живёт независимо от WebRTC: если он работает, сессию не гасим —
+            // падение ICE не должно убивать работающий резервный канал.
+            // Конец сессии придёт от зрителя (state=ended) или из цикла опроса.
+            if (session.Relay is not null)
+            {
+                Log.Info("продолжаем через резервный канал");
+                return;
+            }
+
             _ = Task.Run(() => EndSessionAsync(session));
         };
     }
@@ -641,6 +662,25 @@ public sealed class AgentRuntime
                 }
                 break;
 
+            // Зритель просит резервный канал: P2P не сошёлся, гоним кадры через сервер.
+            case "relay":
+                var enableRelay = message.Payload.ValueKind == JsonValueKind.Object &&
+                                  message.Payload.TryGetProperty("on", out var relayOn) &&
+                                  relayOn.ValueKind == JsonValueKind.True;
+
+                if (enableRelay && session.Relay is null)
+                {
+                    session.Relay = new RelayStreamer(_client, session.Id, _config, session.Injector);
+                    session.Relay.Start();
+                }
+                else if (!enableRelay && session.Relay is not null)
+                {
+                    await session.Relay.DisposeAsync();
+                    session.Relay = null;
+                    Log.Info("резервный канал: выключен");
+                }
+                break;
+
             case "ice":
                 if (session.Transport is not null)
                 {
@@ -721,13 +761,38 @@ public sealed class AgentRuntime
         session.Injector.Handle(json);
     }
 
-    /// <summary>Листинг каталога для выбора файла на удалённой машине.</summary>
+    /// <summary>Листинг каталога для файловой панели. Пустой путь — корни дисков.</summary>
     private static object BuildListing(string? requested)
     {
         var path = string.IsNullOrWhiteSpace(requested) ? FileWire.Downloads : requested;
 
         try
         {
+            // Пустой запрос — список дисков (для панели «удалённый компьютер»).
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                var roots = new List<object>();
+
+                foreach (var drive in DriveInfo.GetDrives())
+                {
+                    if (!drive.IsReady)
+                    {
+                        continue;
+                    }
+
+                    var label = drive.DriveType == DriveType.Fixed
+                        ? $"{drive.Name} ({drive.VolumeLabel})"
+                        : $"{drive.Name} ({drive.DriveType.ToString().ToLower()})";
+
+                    roots.Add(new { n = label, d = true, s = 0L, p = drive.Name });
+                }
+
+                // Рабочий стол хоста — панель открывает его по умолчанию.
+                var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+
+                return new { t = "file", op = "list", path = "", parent = "", desktop, entries = roots };
+            }
+
             if (Directory.Exists(path))
             {
                 var entries = new List<object>();
@@ -741,7 +806,7 @@ public sealed class AgentRuntime
                         continue;
                     }
 
-                    entries.Add(new { n = info.Name, d = true });
+                    entries.Add(new { n = info.Name, d = true, s = 0L, p = info.FullName });
                 }
 
                 foreach (var file in Directory.EnumerateFiles(path).Take(300))
@@ -753,7 +818,7 @@ public sealed class AgentRuntime
                         continue;
                     }
 
-                    entries.Add(new { n = info.Name, d = false });
+                    entries.Add(new { n = info.Name, d = false, s = info.Length, p = info.FullName });
                 }
 
                 return new
@@ -795,7 +860,7 @@ public sealed class AgentRuntime
             return false;
         }
 
-        await session.Sender.SendAsync(path, ct);
+        await session.Sender.SendAsync(path, null, ct);
         return true;
     }
 
@@ -810,8 +875,11 @@ public sealed class AgentRuntime
             case "offer":
                 var name = root.TryGetProperty("name", out var nameValue) ? nameValue.GetString() ?? "file" : "file";
                 var size = root.TryGetProperty("size", out var sizeValue) && sizeValue.TryGetInt64(out var bytes) ? bytes : 0;
+                var dir = root.TryGetProperty("dir", out var dirValue) && dirValue.ValueKind == JsonValueKind.String
+                    ? dirValue.GetString()
+                    : null;
 
-                if (session.Files.TryStart(id, name, size, out var error))
+                if (session.Files.TryStart(id, name, size, out var error, dir))
                 {
                     session.Transport?.SendControl(JsonSerializer.Serialize(new { t = "file", op = "accept", id }));
                     Log.Info($"приём файла: {name} ({size / 1024} КБ)");
@@ -847,7 +915,10 @@ public sealed class AgentRuntime
                 }
 
                 Log.Info($"зритель скачивает: {remotePath}");
-                _ = Task.Run(() => session.Sender?.SendAsync(remotePath));
+                var saveDir = root.TryGetProperty("dir", out var saveValue) && saveValue.ValueKind == JsonValueKind.String
+                    ? saveValue.GetString()
+                    : null;
+                _ = Task.Run(() => session.Sender?.SendAsync(remotePath, saveDir));
                 break;
 
             case "browse":
@@ -901,6 +972,12 @@ public sealed class AgentRuntime
     {
         session.Files.Dispose();
 
+        if (session.Relay is not null)
+        {
+            await session.Relay.DisposeAsync();
+            session.Relay = null;
+        }
+
         if (session.Streamer is not null)
         {
             await session.Streamer.DisposeAsync();
@@ -933,6 +1010,9 @@ public sealed class AgentRuntime
         public bool OfferSent { get; set; }
         public IPeerTransport? Transport { get; set; }
         public ScreenStreamer? Streamer { get; set; }
+
+        /// <summary>Резервный канал через сервер — включается, когда P2P не сошёлся.</summary>
+        public RelayStreamer? Relay { get; set; }
         public int InputCount { get; set; }
         public int EndedFlag;
         public InputInjector Injector { get; } = new();

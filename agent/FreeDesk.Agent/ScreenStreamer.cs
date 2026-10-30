@@ -181,8 +181,25 @@ public sealed class ScreenStreamer : IAsyncDisposable
             var skipped = 0;
             var bytes = 0L;
 
-            while (await timer.WaitForNextTickAsync(_cts.Token))
+            while (true)
             {
+                bool tick;
+
+                try
+                {
+                    tick = await timer.WaitForNextTickAsync(_cts.Token);
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Гонка dispose с тиком таймера — штатный выход, а не катастрофа.
+                    break;
+                }
+
+                if (!tick)
+                {
+                    break;
+                }
+
                 try
                 {
                     ApplyDisplaySwitch();
@@ -197,6 +214,13 @@ public sealed class ScreenStreamer : IAsyncDisposable
                     {
                         SendH264(frame, stride, ref frames, ref bytes);
                     }
+                }
+                catch (AccessViolationException ex)
+                {
+                    // Нативный краш драйвера захвата/энкодера — в .NET Core он ловится,
+                    // но доверять этому источнику больше нельзя: сразу GDI.
+                    _effectiveMode = "gdi";
+                    RecreateCaptureAfterError(ex);
                 }
                 catch (Exception ex)
                 {

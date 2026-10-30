@@ -100,6 +100,9 @@ public sealed class FileReceiver : IDisposable
 {
     private readonly Dictionary<int, Incoming> _active = new();
 
+    /// <summary>Прогресс приёма: id, имя, принято байт, всего байт, путь (заполнен, когда файл готов).</summary>
+    public event Action<int, string, long, long, string?>? Progress;
+
     public sealed record Received(string Path, string Name, long Size);
 
     private sealed class Incoming
@@ -111,8 +114,9 @@ public sealed class FileReceiver : IDisposable
         public long Written { get; set; }
     }
 
-    /// <summary>Готов ли принимать файл; ошибка — повод ответить отказом.</summary>
-    public bool TryStart(int id, string name, long size, out string? error)
+    /// <summary>Готов ли принимать файл; ошибка — повод ответить отказом.
+    /// targetDir — папка, открытая на принимающей стороне; невалидная — папка приёма.</summary>
+    public bool TryStart(int id, string name, long size, out string? error, string? targetDir = null)
     {
         error = null;
         name = FileWire.SanitizeFileName(name);
@@ -129,9 +133,11 @@ public sealed class FileReceiver : IDisposable
             return false;
         }
 
+        var directory = ResolveDirectory(targetDir);
+
         try
         {
-            var path = FileWire.UniquePath(FileWire.Downloads, name);
+            var path = FileWire.UniquePath(directory, name);
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024);
 
             _active[id] = new Incoming { Stream = stream, Path = path, Name = name, Size = size };
@@ -142,6 +148,31 @@ public sealed class FileReceiver : IDisposable
             error = ex.Message;
             return false;
         }
+    }
+
+    /// <summary>Папка приёма: предлагаемая, если существует, иначе Downloads\FreeDesk.</summary>
+    private static string ResolveDirectory(string? targetDir)
+    {
+        if (string.IsNullOrWhiteSpace(targetDir))
+        {
+            return FileWire.Downloads;
+        }
+
+        try
+        {
+            var full = Path.GetFullPath(targetDir);
+
+            if (Directory.Exists(full))
+            {
+                return full;
+            }
+        }
+        catch
+        {
+            // кривой путь от другой стороны — молча падаем в папку приёма
+        }
+
+        return FileWire.Downloads;
     }
 
     /// <summary>Пишет чанк; возвращает готовый файл, когда получено всё.</summary>
@@ -157,6 +188,7 @@ public sealed class FileReceiver : IDisposable
 
         if (incoming.Written < incoming.Size)
         {
+            Progress?.Invoke(id, incoming.Name, incoming.Written, incoming.Size, null);
             return null;
         }
 
@@ -164,6 +196,7 @@ public sealed class FileReceiver : IDisposable
         incoming.Stream.Flush();
         incoming.Stream.Dispose();
 
+        Progress?.Invoke(id, incoming.Name, incoming.Written, incoming.Size, incoming.Path);
         return new Received(incoming.Path, incoming.Name, incoming.Written);
     }
 
@@ -205,7 +238,11 @@ public sealed class FileSender
     private readonly IPeerTransport _peer;
     private readonly Action<string>? _status;
     private readonly Dictionary<int, TaskCompletionSource<bool>> _offers = new();
+    private readonly Dictionary<int, CancellationTokenSource> _streams = new();
     private int _counter;
+
+    /// <summary>Прогресс отправки: имя, отправлено байт, всего байт.</summary>
+    public event Action<string, long, long>? SendProgress;
 
     public FileSender(IPeerTransport peer, Action<string>? status = null)
     {
@@ -213,11 +250,22 @@ public sealed class FileSender
         _status = status;
     }
 
-    /// <summary>Ответ на наше предложение (accept/reject). true — сообщение наше.</summary>
+    /// <summary>Ответ на наше предложение (accept/reject/cancel). true — сообщение наше.</summary>
     public bool HandleControl(System.Text.Json.JsonElement root)
     {
         var op = root.TryGetProperty("op", out var opValue) ? opValue.GetString() : null;
         var id = root.TryGetProperty("id", out var idValue) && idValue.TryGetInt32(out var parsed) ? parsed : 0;
+
+        // Другая сторона прервала приём — останавливаем свою отправку.
+        if (op == "cancel")
+        {
+            if (_streams.TryGetValue(id, out var stream))
+            {
+                stream.Cancel();
+            }
+
+            return _offers.Remove(id);
+        }
 
         if (op is not ("accept" or "reject") || !_offers.TryGetValue(id, out var pending))
         {
@@ -228,8 +276,9 @@ public sealed class FileSender
         return true;
     }
 
-    /// <summary>Предложить и отправить файл. Ошибки — через статус, без исключений наружу.</summary>
-    public async Task SendAsync(string path, CancellationToken ct = default)
+    /// <summary>Предложить и отправить файл. targetDir — куда просим положить на той
+    /// стороне (та папка, что открыта у неё в панели). Ошибки — через статус.</summary>
+    public async Task SendAsync(string path, string? targetDir = null, CancellationToken ct = default)
     {
         if (!_peer.IsConnected)
         {
@@ -255,16 +304,16 @@ public sealed class FileSender
         var accepted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _offers[id] = accepted;
 
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _streams[id] = linked;
+
         try
         {
-            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(new
-            {
-                t = "file",
-                op = "offer",
-                id,
-                name = info.Name,
-                size = info.Length,
-            }));
+            object offer = string.IsNullOrWhiteSpace(targetDir)
+                ? (object) new { t = "file", op = "offer", id, name = info.Name, size = info.Length }
+                : new { t = "file", op = "offer", id, name = info.Name, size = info.Length, dir = targetDir };
+
+            _peer.SendControl(System.Text.Json.JsonSerializer.Serialize(offer));
 
             _status?.Invoke($"ждём подтверждения: {info.Name}");
 
@@ -272,7 +321,7 @@ public sealed class FileSender
 
             try
             {
-                ok = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(60), ct);
+                ok = await accepted.Task.WaitAsync(TimeSpan.FromSeconds(60), linked.Token);
             }
             catch (TimeoutException)
             {
@@ -288,12 +337,11 @@ public sealed class FileSender
 
             await using var stream = File.OpenRead(path);
             var buffer = new byte[FileWire.ChunkSize];
-            var lastReport = DateTime.UtcNow;
             long sent = 0;
 
             while (sent < info.Length)
             {
-                var read = await stream.ReadAsync(buffer.AsMemory(0, FileWire.ChunkSize), ct);
+                var read = await stream.ReadAsync(buffer.AsMemory(0, FileWire.ChunkSize), linked.Token);
 
                 if (read <= 0)
                 {
@@ -303,16 +351,14 @@ public sealed class FileSender
                 _peer.SendBinary(FileWire.Frame(id, buffer.AsSpan(0, read)));
                 sent += read;
 
-                if (DateTime.UtcNow - lastReport > TimeSpan.FromMilliseconds(700))
-                {
-                    _status?.Invoke($"отправка {info.Name}: {sent * 100 / info.Length}%");
-                    lastReport = DateTime.UtcNow;
-                }
+                SendProgress?.Invoke(info.Name, sent, info.Length);
 
-                // не забиваем очередь SCTP
-                while (_peer.BufferedBytes > 1_000_000)
+                // Очередь SCTP упорядоченная: если забить её файлом, события ввода
+                // (мышь, клавиши) встанут в хвост и экран «залипнет». Держим
+                // в полёте немного — ввод в 64 байта проскакивает между чанками.
+                while (_peer.BufferedBytes > 256_000)
                 {
-                    await Task.Delay(20, ct);
+                    await Task.Delay(10, linked.Token);
                 }
             }
 
@@ -335,6 +381,7 @@ public sealed class FileSender
         finally
         {
             _offers.Remove(id);
+            _streams.Remove(id);
         }
     }
 }

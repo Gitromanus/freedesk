@@ -20,6 +20,9 @@ public sealed class MainForm : ModernWindow
     private readonly AgentConfig _config;
     private readonly SignalingClient _client;
     private readonly AgentRuntime _runtime;
+    private Panel _transferBadge = null!;
+    private Label _transferText = null!;
+    private System.Windows.Forms.Timer _transferHideTimer = null!;
     private readonly CancellationTokenSource _cts;
 
     private readonly DoubleBufferedPanel _root = new();
@@ -810,6 +813,44 @@ public sealed class MainForm : ModernWindow
             return accept;
         };
 
+        // Индикатор передачи файлов: тот, к кому подключились, видит процесс —
+        // файлы не должны ходить вскрытую.
+        _transferBadge = new Panel
+        {
+            Size = new Size(300, 34),
+            BackColor = Ui.Card,
+            Visible = false,
+            Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
+        };
+        _transferText = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            ForeColor = Ui.Ink,
+            Font = new Font("Segoe UI", 9f),
+            Padding = new Padding(10, 0, 6, 0),
+            AutoEllipsis = true,
+        };
+        _transferBadge.Controls.Add(_transferText);
+        _transferHideTimer = new System.Windows.Forms.Timer { Interval = 4000 };
+        _transferHideTimer.Tick += (_, _) => _transferBadge.Visible = false;
+
+        _runtime.FileTransferActivity += (name, sent, total) => BeginInvoke(() =>
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            var percent = total > 0 ? Math.Min(100, (int) (sent * 100 / total)) : 0;
+            _transferText.Text = $"⇄ {name}: {percent}%";
+            _transferBadge.Location = new Point(ClientSize.Width - _transferBadge.Width - 12, ClientSize.Height - _transferBadge.Height - 12);
+            _transferBadge.Visible = true;
+            _transferBadge.BringToFront();
+            _transferHideTimer.Stop();
+            _transferHideTimer.Start();
+        });
+
         _runtime.StatusChanged += text => SetStatus(text, Ui.Green);
 
         // Когда наш экран смотрят — окно уходит с пути и возвращается после.
@@ -848,6 +889,10 @@ public sealed class MainForm : ModernWindow
             }
         };
         FormClosing += (_, _) => _cts.Cancel();
+
+        // Индикатор передачи — поверх всего остального.
+        Controls.Add(_transferBadge);
+        _transferBadge.BringToFront();
     }
 
     private async Task StartAsync()
@@ -1038,6 +1083,28 @@ public sealed class MainForm : ModernWindow
         }
     }
 
+    /// <summary>Подогнать главное окно так, чтобы область просмотра совпала с
+    /// родным разрешением удалённого экрана (в пределах рабочего стола).</summary>
+    public void FitViewerTo(Size remote, Rectangle work)
+    {
+        if (WindowState != FormWindowState.Normal)
+        {
+            return;
+        }
+
+        // Хром окна (сайдбар, полоса вкладок, шапка) остаётся как есть —
+        // меняем ровно на разницу, чтобы канвас стал размером с удалённый экран.
+        var deltaWidth = ClientSize.Width - _viewerHost.ClientSize.Width;
+        var deltaHeight = ClientSize.Height - _viewerHost.ClientSize.Height;
+
+        ClientSize = new Size(remote.Width + deltaWidth, remote.Height + deltaHeight);
+
+        // Окно не должно вылезти за рабочий стол после роста.
+        Location = new Point(
+            Math.Clamp(Location.X, work.Left, Math.Max(work.Left, work.Right - Width)),
+            Math.Clamp(Location.Y, work.Top, Math.Max(work.Top, work.Bottom - Height)));
+    }
+
     /// <summary>Причина сбоя без служебного префикса и с большой буквы.</summary>
     private static string CleanReason(string text)
     {
@@ -1088,6 +1155,7 @@ public sealed class MainForm : ModernWindow
             Dock = DockStyle.Fill,
             TopLevel = false,
             FormBorderStyle = FormBorderStyle.None,
+            AutoFitWindow = _config.FitWindowOnConnect,
         };
 
         view.DisconnectRequested += () => DisconnectTab(tab);

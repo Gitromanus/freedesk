@@ -90,3 +90,42 @@ try {
     echo '  ', $e->getMessage(), "\n";
     echo "  → проверьте dsn/user/pass в config.php (в панели Beget: MySQL)\n";
 }
+
+// ── резервный канал: виден ли поток кадров ──
+echo "\nРезервный канал (relay):\n";
+$line('sys_get_temp_dir()', sys_get_temp_dir());
+$relayBase = sys_get_temp_dir() . '/fdrelay';
+
+if (!is_dir($relayBase)) {
+    $line('каталоги сессий', 'нет — хост не отправил ни одного кадра');
+} else {
+    $sessions = glob($relayBase . '/*', GLOB_ONLYDIR) ?: [];
+
+    if ($sessions === []) {
+        $line('каталоги сессий', 'пусто');
+    }
+
+    foreach ($sessions as $dir) {
+        $meta = $dir . '/meta.json';
+        $seq = 0;
+        $ts = 0;
+
+        if (is_file($meta)) {
+            $raw = (string) @file_get_contents($meta);
+            $decoded = json_decode($raw, true);
+
+            if (is_array($decoded)) {
+                $seq = (int) ($decoded['seq'] ?? 0);
+                $ts = (int) ($decoded['ts'] ?? 0);
+            }
+        }
+
+        $age = $ts > 0 ? time() - $ts : -1;
+        printf(
+            "  %s  кадров=%d  последний %s назад\n",
+            basename($dir),
+            $seq,
+            $age < 0 ? '—' : ($age . ' с')
+        );
+    }
+}
