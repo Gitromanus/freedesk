@@ -142,9 +142,11 @@ public sealed class WebRtcPeer : IPeerTransport
 
             if (state is RTCPeerConnectionState.failed or RTCPeerConnectionState.closed)
             {
-                Closed?.Invoke(state.ToString());
+                Closed?.Invoke(DescribeFailure());
             }
         };
+
+        _pc.oniceconnectionstatechange += state => Log.Info($"ice: {state}");
     }
 
     private void AttachChannel(RTCDataChannel channel)
@@ -329,6 +331,26 @@ public sealed class WebRtcPeer : IPeerTransport
     public long BufferedBytes => (long)(_channel?.bufferedAmount ?? 0);
 
     public bool IsConnected => _channel is not null && _channel.readyState == RTCDataChannelState.open;
+
+    /// <summary>
+    /// Почему закрылось соединение — человеческим языком.
+    /// «closed» без пояснения ничего не говорит ни в интерфейсе, ни в логе.
+    /// </summary>
+    private string DescribeFailure()
+    {
+        var ice = _pc.iceConnectionState;
+
+        return ice switch
+        {
+            RTCIceConnectionState.failed =>
+                "сеть не пропустила прямое соединение (NAT/фаервол); нужен TURN-сервер",
+            RTCIceConnectionState.disconnected =>
+                "связь с устройством потеряна",
+            RTCIceConnectionState.closed =>
+                "соединение закрыто",
+            _ => $"соединение закрыто ({ice})",
+        };
+    }
 
     public ValueTask DisposeAsync()
     {
